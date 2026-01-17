@@ -1,0 +1,24 @@
+[package]
+name = "tab_panel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+collections = { path = "../collections" }
+db = { path = "../db" }
+editor = { path = "../editor" }
+file_icons = { path = "../file_icons" }
+fuzzy = { path = "../fuzzy" }
+gpui = { path = "../gpui" }
+language = { path = "../language" }
+menu = { path = "../menu" }
+project = { path = "../project" }
+search = { path = "../search" }
+serde = { version = "1.0", features = ["derive"] }
+settings = { path = "../settings" }
+theme = { path = "../theme" }
+ui = { path = "../ui" }
+util = { path = "../util" }
+workspace = { path = "../workspace" }
+zed_actions = { path = "../zed_actions" }
