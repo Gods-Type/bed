@@ -1,0 +1,6 @@
+# This file ensures the dist directory is tracked by git
+# while allowing us to ignore its binary contents
+# 
+# The dist directory contains build outputs and distributables
+# which should not be committed, but the directory structure
+# should be preserved for version control.

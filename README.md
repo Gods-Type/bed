@@ -29,12 +29,24 @@
 
 ## 🚀 Quick Start
 
-### 📦 Option 1: Instant Demo (2 minutes)
+**⚠️ BUILD ISSUES NOTICE:** 
+Some users experience compilation errors when building from source on Windows. **See [BUILD_ISSUES_FIX.md](BUILD_ISSUES_FIX.md)** for solutions.
+
+**🛠️ RECOMMENDED METHOD:**
 ```bash
-git clone https://github.com/your-repo/bed.git
-cd bed
-build-quick.bat
+build-helper.bat    # ✅ Handles all build issues automatically
 ```
+Choose **Option 3 (Safe Build)** for immediate results.
+
+---
+
+**Alternative Methods:**
+```bash
+build-quick.bat    # 🚀 Quick demo (2 minutes)
+build-complete.bat  # 🏗️ Full build (15-20 minutes, may fail)
+```
+
+**📋 Full Documentation:** See [BUILD_GUIDE.md](BUILD_GUIDE.md) for complete instructions.
 Then run `dist\bed-with-tab-panel.bat`
 
 ### 🏗️ Option 2: Full Build (10-20 minutes)

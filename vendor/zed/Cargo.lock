@@ -16427,6 +16427,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tab_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "editor",
+ "file_icons",
+ "fuzzy",
+ "gpui",
+ "language",
+ "menu",
+ "project",
+ "search",
+ "serde",
+ "settings",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "tab_switcher"
 version = "0.1.0"
 dependencies = [
