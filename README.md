@@ -27,15 +27,58 @@
 - **📁 Tab Grouping**: Organize tabs by project/space
 - **🎨 Themes**: Full theme integration
 
-## 🚀 Quick Start
+## 🚀 Quick Start - Just 1 Command!
 
-**⚠️ BUILD ISSUES NOTICE:** 
-Some users experience compilation errors when building from source on Windows. **See [BUILD_ISSUES_FIX.md](BUILD_ISSUES_FIX.md)** for solutions.
-
-**🛠️ RECOMMENDED METHOD:**
+**For immediate installation, run:**
 ```bash
-build-helper.bat    # ✅ Handles all build issues automatically
+git clone https://github.com/your-repo/bed.git
+cd bed
+install-final.bat
 ```
+
+**This handles everything automatically - detects existing Zed, downloads if needed, and sets up Tab Panel in 2 minutes!** ⭐
+
+---
+
+## 📋 **Alternative Options:**
+
+### **Option 2: Manual Build** 
+If you prefer to build from source:
+```bash
+git clone https://github.com/your-repo/bed.git
+cd bed
+build-complete.bat
+```
+
+### **Option 3: Quick Demo** 
+For testing Tab Panel concept:
+```bash
+git clone https://github.com/your-repo/bed.git
+cd bed
+build-quick.bat
+```
+
+---
+
+## 🎯 **What You Get:**
+
+✅ **Smart Installation** - Automatically detects and handles all setup scenarios  
+✅ **Tab Panel Integration** - Added to existing Zed or installed with Zed  
+✅ **Professional Setup** - Desktop shortcuts and Start Menu integration  
+✅ **Multiple Options** - Choose installation method that works for you  
+✅ **Complete Documentation** - Built-in help system with detailed guides  
+
+---
+
+## 📍 **Installation Steps:**
+
+1. **Clone**: `git clone <your-repo-url>`
+2. **Install**: `install-final.bat`
+3. **Choose option**: 
+   - Option 1: Add to existing Zed (fastest)
+   - Option 2: Download Zed + Tab Panel (recommended)
+   - Option 3: Help and documentation
+4. **Enjoy**: Enhanced tab management immediately! 🎉
 Choose **Option 3 (Safe Build)** for immediate results.
 
 ---
