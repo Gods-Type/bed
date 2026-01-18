@@ -118,7 +118,7 @@ impl Panel for TabPanel {
     }
     
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::File)
+        Some(ui::IconName::Tab)
     }
     
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str> {
@@ -157,8 +157,10 @@ impl TabPanel {
 }
 
 pub fn init(cx: &mut App) {
+    workspace::register_serializable_item::<TabPanel>(cx);
+    
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
-        // Simple initialization - no actions needed for basic functionality
+        workspace.register_action(TabPanel::toggle_focus);
     })
     .detach();
 }

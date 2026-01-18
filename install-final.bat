@@ -1,23 +1,46 @@
 @echo off
-echo.
-echo ==================================
-echo    BED with Tab Panel - Install
-echo ==================================
-echo.
-
-set /p install_choice=Do you want to install BED with Tab Panel?
+setlocal enabledelayedexpansion
 
 echo.
-echo [1] Install Tab Panel (requires Zed to be installed first)
-echo [2] Download Zed + Tab Panel (recommended)
-echo [3] Help and Documentation
+echo ========================================
+echo    BED Tab Panel - Final Installer
+echo ========================================
 echo.
 
-set /p install_choice=%install_choice%
+set INSTALL_SUCCESS=0
 
-if "%install_choice%"=="1" goto :check_zed
-if "%install_choice%"=="2" goto :download_zed
-if "%install_choice%"=="3" goto :show_help
+REM Check for Zed installation
+echo [1/4] Finding Zed installation...
+set ZED_PATH=""
+if exist "C:\Program Files\Zed\zed.exe" (
+    set ZED_PATH=C:\Program Files\Zed
+    echo Found Zed at: !ZED_PATH!
+) else if exist "C:\Users\tasticp\AppData\Local\Programs\Zed\zed.exe" (
+    set ZED_PATH=C:\Users\tasticp\AppData\Local\Programs\Zed
+    echo Found Zed at: !ZED_PATH!
+) else (
+    echo ERROR: Zed not found!
+    echo Please install Zed from https://zed.dev
+    start https://zed.dev
+    pause
+    exit /b 1
+)
+
+REM Copy JavaScript extension
+echo [2/4] Installing Tab Panel extension...
+set ZED_EXTENSIONS=%APPDATA%\Zed\extensions
+if not exist "%ZED_EXTENSIONS%" mkdir "%ZED_EXTENSIONS%"
+
+if not exist "%ZED_EXTENSIONS%\bed-tab-panel" mkdir "%ZED_EXTENSIONS%\bed-tab-panel"
+
+echo Copying extension files...
+xcopy /E /I /Y "extension\*" "%ZED_EXTENSIONS%\bed-tab-panel\" >nul 2>nul
+
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Failed to copy extension files!
+    pause
+    exit /b 1
+)
 goto :end
 
 :check_zed

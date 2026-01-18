@@ -1,0 +1,45 @@
+{
+  "name": "bed-tab-panel",
+  "version": "1.0.0",
+  "description": "Tab Panel for Zed - Enhanced tab management and navigation",
+  "main": "src/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-repo/bed"
+  },
+  "keywords": ["zed", "tab", "panel", "navigation"],
+  "author": "BED Team",
+  "license": "MIT",
+  "engines": {
+    "zed": ">=0.100.0"
+  },
+  "zed": {
+    "languages": [],
+    "grammars": [],
+    "themes": [],
+    "settings": {
+      "tab_panel": {
+        "title": "Tab Panel",
+        "description": "Settings for the Tab Panel extension",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable Tab Panel"
+          },
+          "position": {
+            "type": "string",
+            "enum": ["left", "right"],
+            "default": "left",
+            "description": "Position of the Tab Panel"
+          },
+          "show_icons": {
+            "type": "boolean",
+            "default": true,
+            "description": "Show file icons in Tab Panel"
+          }
+        }
+      }
+    }
+  }
+}

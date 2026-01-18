@@ -1,0 +1,30 @@
+[id]
+name = "tab-panel"
+version = "0.1.0"
+description = "Tab Panel extension - view and manage all open tabs in a panel"
+
+[slash_commands]
+"toggle-tab-panel" = "Toggle the Tab Panel"
+"reveal-in-tab-panel" = "Reveal current file in Tab Panel"
+
+[[slash_command]]
+name = "toggle-tab-panel"
+description = "Toggle the Tab Panel"
+
+[[slash_command]]
+name = "reveal-in-tab-panel"
+description = "Reveal current file in Tab Panel"
+
+[action_panes]
+"toggle-tab-panel" = "Toggle Tab Panel"
+"reveal-in-tab-panel" = "Reveal in Tab Panel"
+
+[contexts]
+"TabPanel" = "Tab Panel Context"
+
+[key_bindings]
+"ctrl-shift-t" = "pane:reveal-in-tab-panel"
+"ctrl-shift-t" = "pane:toggle-tab-panel"
+
+[panel_buttons]
+TabPanel = { label = "Tab Panel", icon = "pane-content" }

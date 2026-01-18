@@ -1,0 +1,220 @@
+/* BED Tab Panel Styles */
+
+.bed-tab-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-background);
+  color: var(--text-color);
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+}
+
+.bed-tab-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--panel-background-hover);
+}
+
+.bed-tab-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.bed-tab-panel-icon {
+  font-size: 16px;
+}
+
+.bed-tab-panel-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.bed-tab-panel-search {
+  background: none;
+  border: none;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.bed-tab-panel-search:hover {
+  background: var(--button-background-hover);
+}
+
+.bed-tab-panel-search-container {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.bed-tab-panel-search-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--input-background);
+  color: var(--text-color);
+  font-size: 12px;
+}
+
+.bed-tab-panel-search-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.bed-tab-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.bed-tab-panel-welcome {
+  padding: 0 12px 16px 12px;
+}
+
+.bed-tab-panel-welcome h3 {
+  margin: 0 0 8px 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.bed-tab-panel-welcome p {
+  margin: 0 0 12px 0;
+  color: var(--text-color-secondary);
+  font-size: 13px;
+}
+
+.bed-tab-panel-features ul {
+  margin: 0 0 12px 0;
+  padding-left: 16px;
+  font-size: 12px;
+}
+
+.bed-tab-panel-features li {
+  margin: 4px 0;
+}
+
+.bed-tab-panel-shortcuts {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px;
+  background: var(--panel-background-hover);
+  border-radius: 4px;
+}
+
+.bed-tab-panel-shortcuts kbd {
+  background: var(--button-background);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 10px;
+}
+
+.bed-tab-panel-tabs {
+  padding: 0 8px;
+}
+
+.bed-tab-panel-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  transition: background-color 0.1s;
+}
+
+.bed-tab-panel-tab:hover {
+  background: var(--panel-background-hover);
+}
+
+.bed-tab-panel-tab.active {
+  background: var(--accent-color);
+  color: var(--accent-color-text);
+}
+
+.bed-tab-panel-tab-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.bed-tab-panel-tab-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.bed-tab-panel-tab-title {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bed-tab-panel-tab-path {
+  font-size: 10px;
+  color: var(--text-color-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bed-tab-panel-tab.active .bed-tab-panel-tab-path {
+  color: var(--accent-color-text);
+  opacity: 0.8;
+}
+
+.bed-tab-panel-tab-modified {
+  font-size: 8px;
+  color: var(--warning-color);
+  flex-shrink: 0;
+}
+
+.bed-tab-panel-empty {
+  padding: 16px 12px;
+  text-align: center;
+  color: var(--text-color-secondary);
+  font-size: 12px;
+}
+
+/* Dark theme support */
+@media (prefers-color-scheme: dark) {
+  .bed-tab-panel {
+    --panel-background: #1a1a1a;
+    --panel-background-hover: #2a2a2a;
+    --border-color: #333;
+    --text-color: #fff;
+    --text-color-secondary: #999;
+    --accent-color: #007acc;
+    --accent-color-text: #fff;
+    --input-background: #2a2a2a;
+    --button-background: #444;
+    --button-background-hover: #555;
+    --warning-color: #ff9500;
+  }
+}
+
+/* Light theme support */
+@media (prefers-color-scheme: light) {
+  .bed-tab-panel {
+    --panel-background: #fff;
+    --panel-background-hover: #f5f5f5;
+    --border-color: #e0e0e0;
+    --text-color: #333;
+    --text-color-secondary: #666;
+    --accent-color: #007acc;
+    --accent-color-text: #fff;
+    --input-background: #f5f5f5;
+    --button-background: #e0e0e0;
+    --button-background-hover: #d0d0d0;
+    --warning-color: #ff9500;
+  }
+}
