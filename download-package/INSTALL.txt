@@ -1,0 +1,41 @@
+BED Tab Panel - Installation Files
+====================================
+
+Choose ONE of these installation methods:
+
+METHOD 1 - .exe Installer (Recommended):
+------------------------------------
+Run: BED-Tab-Panel-Installer-Ready.exe
+  - Professional installer with beautiful UI
+  - Auto-detects Zed
+  - One-click installation
+
+METHOD 2 - Batch File:
+--------------------
+Run: Install-Tab-Panel.bat
+  - Simple batch installer
+  - Very basic, should work on all systems
+  - Text-based interface
+
+METHOD 3 - PowerShell:
+--------------------
+Right-click: Install-Tab-Panel.ps1 → Run with PowerShell
+  - Modern PowerShell installer
+  - Colored output and progress
+  - Alternative if .exe doesn't work
+
+TROUBLESHOOTING:
+=================
+
+If .exe doesn't work:
+1. Try the batch file (Install-Tab-Panel.bat)
+2. Try PowerShell (Install-Tab-Panel.ps1)
+3. Right-click and "Run as administrator"
+4. Check Windows Defender isn't blocking files
+
+After installation:
+1. Restart Zed
+2. Settings → Extensions → Enable "bed-tab-panel"
+3. View → Tab Panel to see your new panel!
+
+Need help? Check: https://github.com/your-repo/bed
