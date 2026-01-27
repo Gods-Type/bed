@@ -32,6 +32,11 @@ pub(crate) fn extension_tests() -> Workflow {
         .add_env(("RUST_BACKTRACE", 1))
         .add_env(("CARGO_INCREMENTAL", 0))
         .add_env(("ZED_EXTENSION_CLI_SHA", ZED_EXTENSION_CLI_SHA))
+        .add_env(("RUSTUP_TOOLCHAIN", "stable"))
+        .add_env((
+            "CARGO_BUILD_TARGET",
+            extension::extension_builder::RUST_TARGET,
+        ))
         .map(|workflow| {
             jobs.into_iter()
                 .chain([tests_pass])
@@ -48,8 +53,8 @@ fn run_clippy() -> Step<Run> {
 fn check_rust() -> NamedJob {
     let job = Job::default()
         .with_repository_owner_guard()
-        .runs_on(runners::LINUX_MEDIUM)
-        .timeout_minutes(3u32)
+        .runs_on(runners::LINUX_LARGE)
+        .timeout_minutes(6u32)
         .add_step(steps::checkout_repo())
         .add_step(steps::cache_rust_dependencies_namespace())
         .add_step(steps::cargo_fmt())
@@ -67,7 +72,7 @@ pub(crate) fn check_extension() -> NamedJob {
     let job = Job::default()
         .with_repository_owner_guard()
         .runs_on(runners::LINUX_LARGE_RAM)
-        .timeout_minutes(2u32)
+        .timeout_minutes(4u32)
         .add_step(steps::checkout_repo())
         .add_step(cache_download)
         .add_step(download_zed_extension_cli(cache_hit))
