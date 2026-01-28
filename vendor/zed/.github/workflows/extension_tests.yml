@@ -64,6 +64,9 @@ jobs:
       with:
         cache: rust
         path: ~/.rustup
+    - name: extension_tests::install_rust_target
+      run: rustup target add wasm32-wasip2
+      shell: bash -euxo pipefail {0}
     - name: steps::cargo_fmt
       run: cargo fmt --all -- --check
       shell: bash -euxo pipefail {0}
@@ -73,7 +76,7 @@ jobs:
     - name: steps::cargo_install_nextest
       uses: taiki-e/install-action@nextest
     - name: steps::cargo_nextest
-      run: cargo nextest run --workspace --no-fail-fast
+      run: 'cargo nextest run --workspace --no-fail-fast --target "$(rustc -vV | sed -n ''s|host: ||p'')"'
       shell: bash -euxo pipefail {0}
       env:
         NEXTEST_NO_TESTS: warn
