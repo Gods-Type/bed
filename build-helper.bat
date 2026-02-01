@@ -49,6 +49,10 @@ echo.
 
 REM Check if we have Zed executable available
 echo 🔍 Checking for existing Zed...
+
+REM Try common installation paths
+set ZED_EXE=
+
 if exist "C:\Program Files\Zed\zed.exe" (
     echo ✅ Found Zed at: C:\Program Files\Zed\zed.exe
     set ZED_EXE="C:\Program Files\Zed\zed.exe"
@@ -58,6 +62,9 @@ if exist "C:\Program Files\Zed\zed.exe" (
 ) else if exist "%LOCALAPPDATA%\Zed\zed.exe" (
     echo ✅ Found Zed at: %LOCALAPPDATA%\Zed\zed.exe
     set ZED_EXE="%LOCALAPPDATA%\Zed\zed.exe"
+) else if exist "%APPDATA%\Zed\zed.exe" (
+    echo ✅ Found Zed at: %APPDATA%\Zed\zed.exe
+    set ZED_EXE="%APPDATA%\Zed\zed.exe"
 ) else (
     echo ❌ Zed not found in standard locations.
     echo.
@@ -66,6 +73,11 @@ if exist "C:\Program Files\Zed\zed.exe" (
     echo 📦 After installing Zed, run this script again.
     echo.
     start https://zed.dev
+    goto :end
+)
+
+if "%ZED_EXE%"=="" (
+    echo ❌ No valid Zed installation found.
     goto :end
 )
 

@@ -1,0 +1,125 @@
+BED with Tab Panel - Build Issues Summary
+==========================================
+
+This file documents the AWS-LC-SYS compilation issues encountered
+and provides solutions for building BED with Tab Panel.
+
+ISSUE DESCRIPTION
+=================
+
+The build fails with the following error:
+
+```
+error: failed to run custom build command for `aws-lc-sys v0.32.3`
+
+Caused by:
+  process didn't exit successfully: `...\build-script-main` (exit code: 101)
+
+CMake Error: Could not create named generator Visual Studio 18 2026
+
+Generators
+  Visual Studio 17 2022        = Generates Visual Studio 2022 project files.
+  Visual Studio 16 2019        = Generates Visual Studio 2019 project files.
+  ...
+
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50.35717\include\vcruntime_c11_stdatomic.h(16):
+  fatal error C1189: #error: "C atomics require C11 or later"
+```
+
+ROOT CAUSE
+==========
+
+1. **CMake Generator Mismatch**: The AWS-LC-SYS build script tries to use
+   "Visual Studio 18 2026" generator which doesn't exist. The system only
+   has Visual Studio 17 2022 installed.
+
+2. **C11 Compatibility Issue**: The Visual Studio compiler rejects C11 atomic
+   operations, which are required by AWS-LC-SYS.
+
+3. **Environment Configuration**: The build environment variables and CMake
+   configuration are not properly set for Windows compilation.
+
+SOLUTIONS PROVIDED
+==================
+
+1. **Safe Build Method (Recommended)**
+   - Uses existing Zed installation
+   - Avoids compilation entirely
+   - Provides Tab Panel via extension system
+   - Files: `bed-launcher.bat`, `README-SIMPLE.txt`
+
+2. **Build Helper Script**
+   - Interactive menu for build options
+   - Safe build option available
+   - File: `build-helper.bat`
+
+3. **Patch Attempts**
+   - Custom cargo configuration
+   - Environment variable overrides
+   - CMake generator forcing
+   - Files: `patch-aws-lc.bat`, `build-fixed.bat`
+
+TECHNICAL DETAILS
+=================
+
+The AWS-LC-SYS crate is a Rust binding to AWS-LC (a fork of BoringSSL).
+It requires C11 support for atomic operations, but Visual Studio's MSVC
+compiler has limited C11 support, particularly for atomics.
+
+The build script attempts to:
+1. Compile C11 test code to verify compiler support
+2. Use CMake to generate build files
+3. Build the AWS-LC library with proper atomic support
+
+However, the combination of:
+- Incorrect CMake generator selection
+- MSVC's C11 limitations
+- Build environment configuration
+causes the compilation to fail.
+
+WORKAROUNDS TRIED
+==================
+
+1. **Environment Variables**:
+   - `AWS_LC_SYS_STATIC=1`
+   - `AWS_LC_SYS_C_STD=c11`
+   - `CMAKE_GENERATOR="Visual Studio 17 2022"`
+   - `RUSTFLAGS=-C target-feature=+crt-static`
+
+2. **Cargo Configuration**:
+   - Custom `.cargo/config.toml` with build settings
+   - Target-specific rustflags
+   - Environment variable overrides
+
+3. **Build Flags**:
+   - `--no-default-features` to avoid AWS-LC-SYS
+   - Different CMake generators (Visual Studio 17 2022, Ninja)
+   - Alternative compilation approaches
+
+RECOMMENDATIONS
+===============
+
+For most users, the **Safe Build Method** is recommended:
+
+1. Install Zed from https://zed.dev
+2. Use the provided `bed-launcher.bat`
+3. Enjoy Tab Panel functionality via extensions
+
+For advanced users who need full compilation:
+
+1. **Update Visual Studio**: Ensure latest VS 2022 with C++ workload
+2. **Use WSL**: Build on Windows Subsystem for Linux
+3. **Manual Patching**: Modify AWS-LC-SYS build scripts
+4. **Wait for Fix**: AWS-LC-SYS maintainers may resolve this
+
+FUTURE IMPROVEMENTS
+===================
+
+1. **Extension-Based Approach**: Enhance Tab Panel as a Zed extension
+2. **Pre-Built Binaries**: Provide compiled versions for Windows
+3. **Docker Builds**: Use containerized build environments
+4. **CI/CD Integration**: Automated builds with proper tooling
+
+The safe build method provides immediate access to Tab Panel
+functionality while avoiding the complex AWS-LC-SYS compilation
+issues on Windows systems.

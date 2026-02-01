@@ -267,6 +267,11 @@ release/
 packages/
 dist-dev/
 
+# Build scripts (keep some, ignore temporary ones)
+build-fixed.bat
+patch-aws-lc.bat
+build-simple.bat
+
 # Local development overrides
 local/
 dev/
@@ -304,3 +309,18 @@ sync/
 # Assets that can be downloaded
 assets/downloaded/
 assets/cached/
+
+# AWS-LC-SYS specific (Windows build issues)
+# ------------------------------------
+# Temporary build files from AWS-LC-SYS compilation attempts
+vendor/zed/target/release/build/aws-lc-sys-*/
+vendor/zed/target/debug/build/aws-lc-sys-*/
+
+# CMake cache and temporary files
+vendor/zed/target/release/build/*/out/
+vendor/zed/target/debug/build/*/out/
+
+# Keep the actual dist files we want to distribute
+!dist/bed-launcher.bat
+!dist/README-SIMPLE.txt
+!dist/BUILD_ISSUES_SUMMARY.txt
