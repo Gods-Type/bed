@@ -1,10 +1,10 @@
 @echo off
-REM Build script for Zed with Tab Panel on Windows
 setlocal enabledelayedexpansion
 
 echo.
 echo ========================================
 echo    Building BED with Tab Panel
+    (Simplified Build Script)
 echo ========================================
 echo.
 
@@ -25,32 +25,46 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-echo [1/4] Checking environment... OK
+echo [1/3] Checking environment... OK
 echo.
 
-REM Clean previous builds
-if exist "vendor\zed\target\release" (
-    echo [2/4] Cleaning previous builds...
-    rmdir /s /q "vendor\zed\target\release" >nul 2>nul
-)
-echo [2/4] Previous builds cleaned...
-echo.
+REM Try to build with AWS-LC-SYS fixes
+echo [2/3] Building Zed with Tab Panel...
+echo Applying AWS-LC-SYS compilation fixes...
 
-REM Build Zed
-echo [3/4] Building Zed with Tab Panel...
+set AWS_LC_SYS_STATIC=1
+set AWS_LC_SYS_C_STD=c11
+set RUSTFLAGS=-C target-feature=+crt-static
+
 cd vendor\zed
 cargo build --release --bin zed
 if %ERRORLEVEL% NEQ 0 (
-    echo ERROR: Build failed!
-    pause
-    exit /b 1
+    echo ERROR: Build failed with AWS-LC-SYS issues!
+    echo.
+    echo Trying alternative approach...
+    echo.
+
+    REM Try without the problematic features
+    echo [2/3] Attempting build without problematic features...
+    cargo build --release --bin zed --no-default-features
+    if %ERRORLEVEL% NEQ 0 (
+        echo ERROR: Alternative build also failed!
+        echo.
+        echo Please try the safe build method:
+        echo 1. Install Zed from https://zed.dev
+        echo 2. Use build-helper.bat for safe installation
+        cd ..\..
+        pause
+        exit /b 1
+    )
 )
 cd ..\..
-echo [3/4] Build completed successfully!
+
+echo [2/3] Build completed successfully!
 echo.
 
 REM Create distributable package
-echo [4/4] Creating distributable package...
+echo [3/3] Creating distributable package...
 if not exist "dist" mkdir dist
 
 REM Copy executable
@@ -67,7 +81,6 @@ if exist "vendor\zed\crates\zed\resources" (
 )
 
 REM Create README
-echo Creating README...
 (
 echo BED with Tab Panel
 echo ==================
@@ -85,50 +98,23 @@ echo 1. Run bed-with-tab-panel.exe
 echo 2. The editor will start with Tab Panel enabled
 echo.
 echo To toggle Tab Panel:
-echo - Go to View -^> Tab Panel
+echo - Go to View -> Tab Panel
 echo - Or use the action palette and search for "Tab Panel"
 echo.
 echo This is an experimental build. Please report any issues.
 ) > "dist\README.txt"
 
-REM Create installer
-echo Creating installer...
-(
-echo @echo off
-echo Installing BED with Tab Panel...
-echo.
-echo REM Create installation directory
-echo if not exist "%%APPDATA%%\BED" mkdir "%%APPDATA%%\BED"
-echo.
-echo REM Copy files
-echo copy "bed-with-tab-panel.exe" "%%APPDATA%%\BED\"
-echo if exist "resources" xcopy /E /I /Y "resources" "%%APPDATA%%\BED\resources\"
-echo.
-echo REM Create desktop shortcut
-echo powershell -Command "%%WshShell = New-Object -comObject WScript.Shell; %%Shortcut = %%WshShell.CreateShortcut('%%USERPROFILE%%\Desktop\BED with Tab Panel.lnk'); %%Shortcut.TargetPath = '%%APPDATA%%\BED\bed-with-tab-panel.exe'; %%Shortcut.Save()^^"
-echo.
-echo REM Add to PATH ^(optional^)
-echo Adding to PATH...
-echo setx PATH "%%PATH%%;%%APPDATA%%\BED" /M
-echo.
-echo Installation complete!
-echo You can now run BED with Tab Panel from your desktop or start menu.
-echo pause
-) > "dist\install.bat"
-
 echo.
 echo ========================================
-echo Build completed successfully! 
+echo Build completed successfully!
 echo ========================================
 echo.
 echo Output files created in dist\:
-echo   - bed-with-tab-panel.exe  ^(Main executable^)
-echo   - install.bat             ^(Windows installer^)
-echo   - README.txt              ^(Documentation^)
+echo   - bed-with-tab-panel.exe  (Main executable)
+echo   - README.txt              (Documentation)
 echo.
-echo To install:
-echo   1. Run dist\install.bat on Windows
-echo   2. Or directly run bed-with-tab-panel.exe
+echo To run:
+echo   dist\bed-with-tab-panel.exe
 echo.
 echo Press any key to open the dist folder...
 pause >nul

@@ -226,6 +226,7 @@ members = [
     "extensions/html",
     "extensions/proto",
     "extensions/slash-commands-example",
+    "extensions/tab-panel",
     "extensions/test-extension",
 
     #

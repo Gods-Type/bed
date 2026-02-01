@@ -8,11 +8,9 @@ echo  ║     Handles common compilation issues            ║
 echo  ╚═════════════════════════════════════╝
 echo.
 
-echo 📋 Checking build environment...
-
 REM Check if we're in the right directory
-if not exist "build-complete.bat" (
-    echo ❌ ERROR: build-complete.bat not found!
+if not exist "build.bat" (
+    echo ❌ ERROR: build.bat not found!
     echo.
     echo Please ensure you're in the BED project directory.
     echo.
@@ -22,56 +20,25 @@ if not exist "build-complete.bat" (
 
 echo ✅ Build scripts found!
 
-REM Check for known compilation issues
-echo 🔧 Checking for common build issues...
-
-REM Set environment variables to handle compilation problems
-set RUST_BACKTRACE=1
-set AWS_LC_SYS_PREGENERATING_BINDINGS_x86_64_pc_windows_msvc=
-set AWS_LC_SYS_PREGENERATING_BINDINGS=
-
-REM Try to disable problematic build features
-set AWS_LC_SYS_STATIC=1
-set AWS_LC_SYS_C_STD=c11
-set CC=
-set CXX=
-
-echo 🔧 Applying compilation fixes...
-
 echo.
-echo 📦 Choosing build method...
+echo 📋 Build Options:
 echo.
-echo 1️⃣ Standard Build (may fail with AWS issues)
-echo 2️⃣ Fixed Build (bypasses common issues)
-echo 3️⃣ Safe Build (uses pre-built Zed + our Tab Panel)
+echo 1️⃣ Standard Build (attempts to compile Zed with fixes)
+echo 2️⃣ Safe Build (uses existing Zed installation)
 echo.
 
-set /p choice="Select build method (1-3): "
+set /p choice="Select build method (1-2): "
 
 if "%choice%"=="1" goto :standard_build
-if "%choice%"=="2" goto :fixed_build
-if "%choice%"=="3" goto :safe_build
+if "%choice%"=="2" goto :safe_build
 goto :invalid_choice
 
 :standard_build
 echo.
 echo 🏗️ Starting standard build...
-echo This may fail with AWS-LC-SYS compilation issues.
+echo This will attempt to compile Zed with AWS-LC-SYS fixes.
 echo.
-call build-complete.bat
-goto :end
-
-:fixed_build
-echo.
-echo 🔧 Starting fixed build...
-echo Applying workarounds for AWS-LC-SYS compilation...
-echo.
-REM Set environment to bypass compilation issues
-set RUSTFLAGS=-C target-feature=+crt-static
-set AWS_LC_SYS_C_STD=c11
-set AWS_LC_SYS_STATIC=1
-
-call build-complete.bat
+call build.bat
 goto :end
 
 :safe_build
@@ -88,6 +55,9 @@ if exist "C:\Program Files\Zed\zed.exe" (
 ) else if exist "C:\Program Files (x86)\Zed\zed.exe" (
     echo ✅ Found Zed at: C:\Program Files (x86)\Zed\zed.exe
     set ZED_EXE="C:\Program Files (x86)\Zed\zed.exe"
+) else if exist "%LOCALAPPDATA%\Zed\zed.exe" (
+    echo ✅ Found Zed at: %LOCALAPPDATA%\Zed\zed.exe
+    set ZED_EXE="%LOCALAPPDATA%\Zed\zed.exe"
 ) else (
     echo ❌ Zed not found in standard locations.
     echo.
@@ -107,7 +77,7 @@ if not exist "dist" mkdir dist
 
 copy "vendor\zed\crates\zed\resources\*" "dist\" >nul 2>nul
 
-REM Create launcher script
+REM Create launcher script with proper ZED_EXE variable
 (
 echo @echo off
 echo.
@@ -133,6 +103,9 @@ if exist "%ZED_EXE%" (
     start https://zed.dev
 )
 ) > "dist\bed-with-tab-panel-safe.bat"
+
+REM Add ZED_EXE variable to the launcher
+echo set ZED_EXE=%ZED_EXE% >> "dist\bed-with-tab-panel-safe.bat"
 
 REM Create README for safe build
 (
@@ -160,6 +133,8 @@ echo If Tab Panel doesn't appear:
 echo   - Restart the launcher
 echo   - Check Zed installation
 echo   - Verify Tab Panel is enabled in settings
+echo.
+echo For full Tab Panel functionality, try the standard build.
 ) > "dist\README-SAFE.txt"
 
 echo.
@@ -173,7 +148,7 @@ goto :end
 
 :invalid_choice
 echo.
-echo ❌ Invalid choice. Please select 1, 2, or 3.
+echo ❌ Invalid choice. Please select 1 or 2.
 pause
 goto :end
 
