@@ -21299,15 +21299,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed_tab_panel"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "zed_extension_api 0.1.0",
-]
-
-[[package]]
 name = "zed_test_extension"
 version = "0.1.0"
 dependencies = [
