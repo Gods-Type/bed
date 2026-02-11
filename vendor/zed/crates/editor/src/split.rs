@@ -24,12 +24,13 @@ use ui::{
 
 use crate::{
     display_map::CompanionExcerptPatch,
+    element::SplitSide,
     split_editor_view::{SplitEditorState, SplitEditorView},
 };
 use workspace::{
     ActivatePaneLeft, ActivatePaneRight, Item, ToolbarItemLocation, Workspace,
     item::{BreadcrumbText, ItemBufferKind, ItemEvent, SaveOptions, TabContentParams},
-    searchable::{SearchEvent, SearchableItem, SearchableItemHandle},
+    searchable::{SearchEvent, SearchToken, SearchableItem, SearchableItemHandle},
 };
 
 use crate::{
@@ -173,42 +174,94 @@ fn patches_for_range<F>(
 where
     F: Fn(&BufferDiffSnapshot, RangeInclusive<Point>, &text::BufferSnapshot) -> Patch<Point>,
 {
-    let mut result = Vec::new();
-    let mut patches = HashMap::default();
+    struct PendingExcerpt<'a> {
+        source_excerpt_id: ExcerptId,
+        target_excerpt_id: ExcerptId,
+        source_buffer: &'a text::BufferSnapshot,
+        target_buffer: &'a text::BufferSnapshot,
+        buffer_point_range: Range<Point>,
+        source_context_range: Range<Point>,
+    }
 
-    for (source_buffer, buffer_offset_range, source_excerpt_id) in
-        source_snapshot.range_to_buffer_ranges(source_bounds)
+    let mut result = Vec::new();
+    let mut current_buffer_id: Option<BufferId> = None;
+    let mut pending_excerpts: Vec<PendingExcerpt> = Vec::new();
+    let mut union_context_start: Option<Point> = None;
+    let mut union_context_end: Option<Point> = None;
+
+    let flush_buffer = |pending: &mut Vec<PendingExcerpt>,
+                        union_start: Point,
+                        union_end: Point,
+                        result: &mut Vec<CompanionExcerptPatch>| {
+        let Some(first) = pending.first() else {
+            return;
+        };
+
+        let diff = source_snapshot
+            .diff_for_buffer_id(first.source_buffer.remote_id())
+            .unwrap();
+        let rhs_buffer = if first.source_buffer.remote_id() == diff.base_text().remote_id() {
+            first.target_buffer
+        } else {
+            first.source_buffer
+        };
+
+        let patch = translate_fn(diff, union_start..=union_end, rhs_buffer);
+
+        for excerpt in pending.drain(..) {
+            result.push(patch_for_excerpt(
+                source_snapshot,
+                target_snapshot,
+                excerpt.source_excerpt_id,
+                excerpt.target_excerpt_id,
+                excerpt.target_buffer,
+                excerpt.source_context_range,
+                &patch,
+                excerpt.buffer_point_range,
+            ));
+        }
+    };
+
+    for (source_buffer, buffer_offset_range, source_excerpt_id, source_context_range) in
+        source_snapshot.range_to_buffer_ranges_with_context(source_bounds)
     {
         let target_excerpt_id = excerpt_map.get(&source_excerpt_id).copied().unwrap();
         let target_buffer = target_snapshot
             .buffer_for_excerpt(target_excerpt_id)
             .unwrap();
-        let patch = patches.entry(source_buffer.remote_id()).or_insert_with(|| {
-            let diff = source_snapshot
-                .diff_for_buffer_id(source_buffer.remote_id())
-                .unwrap();
-            let rhs_buffer = if source_buffer.remote_id() == diff.base_text().remote_id() {
-                &target_buffer
-            } else {
-                source_buffer
-            };
-            // TODO(split-diff) pass only the union of the ranges for the affected excerpts
-            translate_fn(diff, Point::zero()..=source_buffer.max_point(), rhs_buffer)
-        });
-        let buffer_point_range = buffer_offset_range.to_point(source_buffer);
 
-        // TODO(split-diff) maybe narrow the patch to only the edited part of the excerpt
-        // (less useful for project diff, but important if we want to do singleton side-by-side diff)
-        result.push(patch_for_excerpt(
-            source_snapshot,
-            target_snapshot,
+        let buffer_id = source_buffer.remote_id();
+
+        if current_buffer_id != Some(buffer_id) {
+            if let (Some(start), Some(end)) = (union_context_start.take(), union_context_end.take())
+            {
+                flush_buffer(&mut pending_excerpts, start, end, &mut result);
+            }
+            current_buffer_id = Some(buffer_id);
+        }
+
+        let buffer_point_range = buffer_offset_range.to_point(source_buffer);
+        let source_context_range = source_context_range.to_point(source_buffer);
+
+        union_context_start = Some(union_context_start.map_or(source_context_range.start, |s| {
+            s.min(source_context_range.start)
+        }));
+        union_context_end = Some(union_context_end.map_or(source_context_range.end, |e| {
+            e.max(source_context_range.end)
+        }));
+
+        pending_excerpts.push(PendingExcerpt {
             source_excerpt_id,
             target_excerpt_id,
             source_buffer,
             target_buffer,
-            patch,
             buffer_point_range,
-        ));
+            source_context_range,
+        });
+    }
+
+    if let (Some(start), Some(end)) = (union_context_start, union_context_end) {
+        flush_buffer(&mut pending_excerpts, start, end, &mut result);
     }
 
     result
@@ -219,8 +272,8 @@ fn patch_for_excerpt(
     target_snapshot: &MultiBufferSnapshot,
     source_excerpt_id: ExcerptId,
     target_excerpt_id: ExcerptId,
-    source_buffer: &text::BufferSnapshot,
     target_buffer: &text::BufferSnapshot,
+    source_context_range: Range<Point>,
     patch: &Patch<Point>,
     source_edited_range: Range<Point>,
 ) -> CompanionExcerptPatch {
@@ -228,11 +281,8 @@ fn patch_for_excerpt(
         .range_for_excerpt(source_excerpt_id)
         .unwrap();
     let source_excerpt_start_in_multibuffer = source_multibuffer_range.start;
-    let source_context_range = source_snapshot
-        .context_range_for_excerpt(source_excerpt_id)
-        .unwrap();
-    let source_excerpt_start_in_buffer = source_context_range.start.to_point(&source_buffer);
-    let source_excerpt_end_in_buffer = source_context_range.end.to_point(&source_buffer);
+    let source_excerpt_start_in_buffer = source_context_range.start;
+    let source_excerpt_end_in_buffer = source_context_range.end;
     let target_multibuffer_range = target_snapshot
         .range_for_excerpt(target_excerpt_id)
         .unwrap();
@@ -332,6 +382,7 @@ pub struct SplittableEditor {
     lhs: Option<LhsEditor>,
     workspace: WeakEntity<Workspace>,
     split_state: Entity<SplitEditorState>,
+    searched_side: Option<SplitSide>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -371,7 +422,17 @@ impl SplittableEditor {
         }
     }
 
-    pub fn last_selected_editor(&self) -> &Entity<Editor> {
+    fn focused_side(&self) -> SplitSide {
+        if let Some(lhs) = &self.lhs
+            && lhs.was_last_focused
+        {
+            SplitSide::Left
+        } else {
+            SplitSide::Right
+        }
+    }
+
+    pub fn focused_editor(&self) -> &Entity<Editor> {
         if let Some(lhs) = &self.lhs
             && lhs.was_last_focused
         {
@@ -410,8 +471,10 @@ impl SplittableEditor {
                     _ => cx.emit(event.clone()),
                 },
             ),
-            cx.subscribe(&rhs_editor, |_, _, event: &SearchEvent, cx| {
-                cx.emit(event.clone());
+            cx.subscribe(&rhs_editor, |this, _, event: &SearchEvent, cx| {
+                if this.searched_side.is_none() || this.searched_side == Some(SplitSide::Right) {
+                    cx.emit(event.clone());
+                }
             }),
         ];
 
@@ -444,6 +507,7 @@ impl SplittableEditor {
             lhs: None,
             workspace: workspace.downgrade(),
             split_state,
+            searched_side: None,
             _subscriptions: subscriptions,
         }
     }
@@ -547,13 +611,20 @@ impl SplittableEditor {
             },
         )];
 
+        subscriptions.push(
+            cx.subscribe(&lhs_editor, |this, _, event: &SearchEvent, cx| {
+                if this.searched_side == Some(SplitSide::Left) {
+                    cx.emit(event.clone());
+                }
+            }),
+        );
+
         let lhs_focus_handle = lhs_editor.read(cx).focus_handle(cx);
         subscriptions.push(
             cx.on_focus_in(&lhs_focus_handle, window, |this, _window, cx| {
                 if let Some(lhs) = &mut this.lhs {
                     if !lhs.was_last_focused {
                         lhs.was_last_focused = true;
-                        cx.emit(SearchEvent::MatchesInvalidated);
                         cx.notify();
                     }
                 }
@@ -566,7 +637,6 @@ impl SplittableEditor {
                 if let Some(lhs) = &mut this.lhs {
                     if lhs.was_last_focused {
                         lhs.was_last_focused = false;
-                        cx.emit(SearchEvent::MatchesInvalidated);
                         cx.notify();
                     }
                 }
@@ -1035,6 +1105,19 @@ impl SplittableEditor {
                 rhs_multibuffer.remove_excerpts_for_path(path.clone(), cx);
             });
         }
+    }
+
+    fn search_token(&self) -> SearchToken {
+        SearchToken::new(self.focused_side() as u64)
+    }
+
+    fn editor_for_token(&self, token: SearchToken) -> &Entity<Editor> {
+        if token.value() == SplitSide::Left as u64 {
+            if let Some(lhs) = &self.lhs {
+                return &lhs.editor;
+            }
+        }
+        &self.rhs_editor
     }
 }
 
@@ -1616,12 +1699,12 @@ impl Item for SplittableEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.last_selected_editor()
+        self.focused_editor()
             .update(cx, |editor, cx| editor.navigate(data, window, cx))
     }
 
     fn deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.last_selected_editor().update(cx, |editor, cx| {
+        self.focused_editor().update(cx, |editor, cx| {
             editor.deactivated(window, cx);
         });
     }
@@ -1660,9 +1743,7 @@ impl Item for SplittableEditor {
     }
 
     fn pixel_position_of_cursor(&self, cx: &App) -> Option<gpui::Point<gpui::Pixels>> {
-        self.last_selected_editor()
-            .read(cx)
-            .pixel_position_of_cursor(cx)
+        self.focused_editor().read(cx).pixel_position_of_cursor(cx)
     }
 }
 
@@ -1670,25 +1751,59 @@ impl SearchableItem for SplittableEditor {
     type Match = Range<Anchor>;
 
     fn clear_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.last_selected_editor().update(cx, |editor, cx| {
+        self.rhs_editor.update(cx, |editor, cx| {
             editor.clear_matches(window, cx);
         });
+        if let Some(lhs_editor) = self.lhs_editor() {
+            lhs_editor.update(cx, |editor, cx| {
+                editor.clear_matches(window, cx);
+            })
+        }
     }
 
     fn update_matches(
         &mut self,
         matches: &[Self::Match],
         active_match_index: Option<usize>,
+        token: SearchToken,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.last_selected_editor().update(cx, |editor, cx| {
-            editor.update_matches(matches, active_match_index, window, cx);
+        self.editor_for_token(token).update(cx, |editor, cx| {
+            editor.update_matches(matches, active_match_index, token, window, cx);
         });
     }
 
+    fn search_bar_visibility_changed(
+        &mut self,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if visible {
+            let side = self.focused_side();
+            self.searched_side = Some(side);
+            match side {
+                SplitSide::Left => {
+                    self.rhs_editor.update(cx, |editor, cx| {
+                        editor.clear_matches(window, cx);
+                    });
+                }
+                SplitSide::Right => {
+                    if let Some(lhs) = &self.lhs {
+                        lhs.editor.update(cx, |editor, cx| {
+                            editor.clear_matches(window, cx);
+                        });
+                    }
+                }
+            }
+        } else {
+            self.searched_side = None;
+        }
+    }
+
     fn query_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) -> String {
-        self.last_selected_editor()
+        self.focused_editor()
             .update(cx, |editor, cx| editor.query_suggestion(window, cx))
     }
 
@@ -1696,22 +1811,24 @@ impl SearchableItem for SplittableEditor {
         &mut self,
         index: usize,
         matches: &[Self::Match],
+        token: SearchToken,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.last_selected_editor().update(cx, |editor, cx| {
-            editor.activate_match(index, matches, window, cx);
+        self.editor_for_token(token).update(cx, |editor, cx| {
+            editor.activate_match(index, matches, token, window, cx);
         });
     }
 
     fn select_matches(
         &mut self,
         matches: &[Self::Match],
+        token: SearchToken,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.last_selected_editor().update(cx, |editor, cx| {
-            editor.select_matches(matches, window, cx);
+        self.editor_for_token(token).update(cx, |editor, cx| {
+            editor.select_matches(matches, token, window, cx);
         });
     }
 
@@ -1719,11 +1836,12 @@ impl SearchableItem for SplittableEditor {
         &mut self,
         identifier: &Self::Match,
         query: &project::search::SearchQuery,
+        token: SearchToken,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.last_selected_editor().update(cx, |editor, cx| {
-            editor.replace(identifier, query, window, cx);
+        self.editor_for_token(token).update(cx, |editor, cx| {
+            editor.replace(identifier, query, token, window, cx);
         });
     }
 
@@ -1733,19 +1851,41 @@ impl SearchableItem for SplittableEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Task<Vec<Self::Match>> {
-        self.last_selected_editor()
+        self.focused_editor()
             .update(cx, |editor, cx| editor.find_matches(query, window, cx))
+    }
+
+    fn find_matches_with_token(
+        &mut self,
+        query: Arc<project::search::SearchQuery>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<(Vec<Self::Match>, SearchToken)> {
+        let token = self.search_token();
+        let editor = self.focused_editor().downgrade();
+        cx.spawn_in(window, async move |_, cx| {
+            let Some(matches) = editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.find_matches(query, window, cx)
+                })
+                .ok()
+            else {
+                return (Vec::new(), token);
+            };
+            (matches.await, token)
+        })
     }
 
     fn active_match_index(
         &mut self,
         direction: workspace::searchable::Direction,
         matches: &[Self::Match],
+        token: SearchToken,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
-        self.last_selected_editor().update(cx, |editor, cx| {
-            editor.active_match_index(direction, matches, window, cx)
+        self.editor_for_token(token).update(cx, |editor, cx| {
+            editor.active_match_index(direction, matches, token, window, cx)
         })
     }
 }
@@ -1754,7 +1894,7 @@ impl EventEmitter<EditorEvent> for SplittableEditor {}
 impl EventEmitter<SearchEvent> for SplittableEditor {}
 impl Focusable for SplittableEditor {
     fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        self.last_selected_editor().read(cx).focus_handle(cx)
+        self.focused_editor().read(cx).focus_handle(cx)
     }
 }
 
