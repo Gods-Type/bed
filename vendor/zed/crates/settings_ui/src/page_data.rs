@@ -2999,7 +2999,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
 }
 
 fn search_and_files_page() -> SettingsPage {
-    fn search_section() -> [SettingsPageItem; 9] {
+    fn search_section() -> [SettingsPageItem; 11] {
         [
             SettingsPageItem::SectionHeader("Search"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3128,6 +3128,52 @@ fn search_and_files_page() -> SettingsPage {
                             .search
                             .get_or_insert_default()
                             .center_on_match = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Search on Input",
+                description: "Whether to search on input in project search.",
+                field: Box::new(SettingField {
+                    json_path: Some("editor.search.search_on_input"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .search
+                            .as_ref()
+                            .and_then(|search| search.search_on_input.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .editor
+                            .search
+                            .get_or_insert_default()
+                            .search_on_input = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Search on Input Debounce",
+                description: "Debounce time in milliseconds for search on input (set to 0 to disable debouncing).",
+                field: Box::new(SettingField {
+                    json_path: Some("editor.search.search_on_input_debounce_ms"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .search
+                            .as_ref()
+                            .and_then(|search| search.search_on_input_debounce_ms.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .editor
+                            .search
+                            .get_or_insert_default()
+                            .search_on_input_debounce_ms = value;
                     },
                 }),
                 metadata: None,
@@ -6939,13 +6985,13 @@ fn ai_page() -> SettingsPage {
                 description: "Whether to disable all AI features in Zed.",
                 field: Box::new(SettingField {
                     json_path: Some("disable_ai"),
-                    pick: |settings_content| settings_content.disable_ai.as_ref(),
+                    pick: |settings_content| settings_content.project.disable_ai.as_ref(),
                     write: |settings_content, value| {
-                        settings_content.disable_ai = value;
+                        settings_content.project.disable_ai = value;
                     },
                 }),
                 metadata: None,
-                files: USER,
+                files: USER | PROJECT,
             }),
         ]
     }
