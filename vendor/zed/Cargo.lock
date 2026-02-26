@@ -7217,6 +7217,7 @@ dependencies = [
  "ctor",
  "db",
  "editor",
+ "feature_flags",
  "futures 0.3.31",
  "fuzzy",
  "git",
@@ -12474,6 +12475,7 @@ version = "0.1.0"
 dependencies = [
  "feature_flags",
  "gpui",
+ "project",
  "settings",
  "smallvec",
  "theme",
@@ -21528,7 +21530,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.226.0"
+version = "0.227.0"
 dependencies = [
  "acp_thread",
  "acp_tools",
