@@ -1973,6 +1973,8 @@ impl Editor {
             .clone_state(&self.scroll_manager, &my_snapshot, &clone_snapshot, cx);
         clone.searchable = self.searchable;
         clone.read_only = self.read_only;
+        clone.buffers_with_disabled_indent_guides =
+            self.buffers_with_disabled_indent_guides.clone();
         clone
     }
 
@@ -15365,7 +15367,7 @@ impl Editor {
     pub fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_mouse_cursor(HideMouseCursorOrigin::MovementAction, cx);
         self.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
-            s.select_ranges(vec![Anchor::min()..Anchor::max()]);
+            s.select_ranges([Anchor::min()..Anchor::max()]);
         });
     }
 
