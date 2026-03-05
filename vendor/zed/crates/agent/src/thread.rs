@@ -893,8 +893,6 @@ pub struct Thread {
     pub(crate) prompt_capabilities_rx: watch::Receiver<acp::PromptCapabilities>,
     pub(crate) project: Entity<Project>,
     pub(crate) action_log: Entity<ActionLog>,
-    /// Tracks the last time files were read by the agent, to detect external modifications
-    pub(crate) file_read_times: HashMap<PathBuf, fs::MTime>,
     /// True if this thread was imported from a shared thread and can be synced.
     imported: bool,
     /// If this is a subagent thread, contains context about the parent
@@ -1014,7 +1012,6 @@ impl Thread {
             prompt_capabilities_rx,
             project,
             action_log,
-            file_read_times: HashMap::default(),
             imported: false,
             subagent_context: None,
             draft_prompt: None,
@@ -1231,7 +1228,6 @@ impl Thread {
             updated_at: db_thread.updated_at,
             prompt_capabilities_tx,
             prompt_capabilities_rx,
-            file_read_times: HashMap::default(),
             imported: db_thread.imported,
             subagent_context: db_thread.subagent_context,
             draft_prompt: db_thread.draft_prompt,
@@ -1436,6 +1432,9 @@ impl Thread {
         environment: Rc<dyn ThreadEnvironment>,
         cx: &mut Context<Self>,
     ) {
+        // Only update the agent location for the root thread, not for subagents.
+        let update_agent_location = self.parent_thread_id().is_none();
+
         let language_registry = self.project.read(cx).languages().clone();
         self.add_tool(CopyPathTool::new(self.project.clone()));
         self.add_tool(CreateDirectoryTool::new(self.project.clone()));
@@ -1453,6 +1452,7 @@ impl Thread {
         self.add_tool(StreamingEditFileTool::new(
             self.project.clone(),
             cx.weak_entity(),
+            self.action_log.clone(),
             language_registry,
         ));
         self.add_tool(FetchTool::new(self.project.read(cx).client().http_client()));
@@ -1463,9 +1463,9 @@ impl Thread {
         self.add_tool(NowTool);
         self.add_tool(OpenTool::new(self.project.clone()));
         self.add_tool(ReadFileTool::new(
-            cx.weak_entity(),
             self.project.clone(),
             self.action_log.clone(),
+            update_agent_location,
         ));
         self.add_tool(SaveFileTool::new(self.project.clone()));
         self.add_tool(RestoreFileFromDiskTool::new(self.project.clone()));
@@ -2336,20 +2336,18 @@ impl Thread {
     ) {
         // Ensure the last message ends in the current tool use
         let last_message = self.pending_message();
-        let push_new_tool_use = last_message.content.last_mut().is_none_or(|content| {
+
+        let has_tool_use = last_message.content.iter_mut().rev().any(|content| {
             if let AgentMessageContent::ToolUse(last_tool_use) = content {
                 if last_tool_use.id == tool_use.id {
                     *last_tool_use = tool_use.clone();
-                    false
-                } else {
-                    true
+                    return true;
                 }
-            } else {
-                true
             }
+            false
         });
 
-        if push_new_tool_use {
+        if !has_tool_use {
             event_stream.send_tool_call(
                 &tool_use.id,
                 &tool_use.name,
