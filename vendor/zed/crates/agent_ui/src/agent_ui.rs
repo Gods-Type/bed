@@ -8,9 +8,9 @@ mod branch_names;
 mod buffer_codegen;
 mod completion_provider;
 mod config_options;
-pub(crate) mod connection_view;
 mod context;
 mod context_server_configuration;
+pub(crate) mod conversation_view;
 mod entry_view_state;
 mod external_source_prompt;
 mod favorite_models;
@@ -34,6 +34,7 @@ mod text_thread_editor;
 mod text_thread_history;
 mod thread_history;
 mod thread_history_view;
+mod thread_metadata_store;
 mod threads_archive_view;
 mod ui;
 
@@ -55,7 +56,7 @@ use language::{
 use language_model::{
     ConfiguredModel, LanguageModelId, LanguageModelProviderId, LanguageModelRegistry,
 };
-use project::DisableAiSettings;
+use project::{AgentId, DisableAiSettings};
 use prompt_store::PromptBuilder;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -70,7 +71,7 @@ pub use crate::agent_panel::{
 use crate::agent_registry_ui::AgentRegistryPage;
 pub use crate::inline_assistant::InlineAssistant;
 pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
-pub(crate) use connection_view::ConnectionView;
+pub(crate) use conversation_view::ConversationView;
 pub use external_source_prompt::ExternalSourcePrompt;
 pub(crate) use mode_selector::ModeSelector;
 pub(crate) use model_selector::ModelSelector;
@@ -217,68 +218,14 @@ pub struct NewNativeAgentThreadFromSummary {
 }
 
 // TODO unify this with AgentType
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Agent {
     NativeAgent,
-    Custom { name: SharedString },
-}
-
-// Custom impl handles legacy variant names from before the built-in agents were moved to
-// the registry: "claude_code" -> Custom { name: "claude-acp" }, "codex" -> Custom { name:
-// "codex-acp" }, "gemini" -> Custom { name: "gemini" }.
-// Can be removed at some point in the future and go back to #[derive(Deserialize)].
-impl<'de> serde::Deserialize<'de> for Agent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use project::agent_server_store::{CLAUDE_AGENT_NAME, CODEX_NAME, GEMINI_NAME};
-
-        let value = serde_json::Value::deserialize(deserializer)?;
-
-        if let Some(s) = value.as_str() {
-            return match s {
-                "native_agent" => Ok(Self::NativeAgent),
-                "claude_code" | "claude_agent" => Ok(Self::Custom {
-                    name: CLAUDE_AGENT_NAME.into(),
-                }),
-                "codex" => Ok(Self::Custom {
-                    name: CODEX_NAME.into(),
-                }),
-                "gemini" => Ok(Self::Custom {
-                    name: GEMINI_NAME.into(),
-                }),
-                other => Err(serde::de::Error::unknown_variant(
-                    other,
-                    &[
-                        "native_agent",
-                        "custom",
-                        "claude_agent",
-                        "claude_code",
-                        "codex",
-                        "gemini",
-                    ],
-                )),
-            };
-        }
-
-        if let Some(obj) = value.as_object() {
-            if let Some(inner) = obj.get("custom") {
-                #[derive(serde::Deserialize)]
-                struct CustomFields {
-                    name: SharedString,
-                }
-                let fields: CustomFields =
-                    serde_json::from_value(inner.clone()).map_err(serde::de::Error::custom)?;
-                return Ok(Self::Custom { name: fields.name });
-            }
-        }
-
-        Err(serde::de::Error::custom(
-            "expected a string variant or {\"custom\": {\"name\": ...}}",
-        ))
-    }
+    Custom {
+        #[serde(rename = "name")]
+        id: AgentId,
+    },
 }
 
 impl Agent {
@@ -289,7 +236,9 @@ impl Agent {
     ) -> Rc<dyn agent_servers::AgentServer> {
         match self {
             Self::NativeAgent => Rc::new(agent::NativeAgentServer::new(fs, thread_store)),
-            Self::Custom { name } => Rc::new(agent_servers::CustomAgentServer::new(name.clone())),
+            Self::Custom { id: name } => {
+                Rc::new(agent_servers::CustomAgentServer::new(name.clone()))
+            }
         }
     }
 }
@@ -378,6 +327,7 @@ pub fn init(
     agent_panel::init(cx);
     context_server_configuration::init(language_registry.clone(), fs.clone(), cx);
     TextThreadEditor::init(cx);
+    thread_metadata_store::init(cx);
 
     register_slash_commands(cx);
     inline_assistant::init(fs.clone(), prompt_builder.clone(), cx);
@@ -750,31 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_legacy_external_agent_variants() {
-        use project::agent_server_store::{CLAUDE_AGENT_NAME, CODEX_NAME, GEMINI_NAME};
-
-        assert_eq!(
-            serde_json::from_str::<Agent>(r#""claude_code""#).unwrap(),
-            Agent::Custom {
-                name: CLAUDE_AGENT_NAME.into(),
-            },
-        );
-        assert_eq!(
-            serde_json::from_str::<Agent>(r#""codex""#).unwrap(),
-            Agent::Custom {
-                name: CODEX_NAME.into(),
-            },
-        );
-        assert_eq!(
-            serde_json::from_str::<Agent>(r#""gemini""#).unwrap(),
-            Agent::Custom {
-                name: GEMINI_NAME.into(),
-            },
-        );
-    }
-
-    #[test]
-    fn test_deserialize_current_external_agent_variants() {
+    fn test_deserialize_external_agent_variants() {
         assert_eq!(
             serde_json::from_str::<Agent>(r#""native_agent""#).unwrap(),
             Agent::NativeAgent,
@@ -782,7 +708,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Agent>(r#"{"custom":{"name":"my-agent"}}"#).unwrap(),
             Agent::Custom {
-                name: "my-agent".into(),
+                id: "my-agent".into(),
             },
         );
     }
