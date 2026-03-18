@@ -16509,12 +16509,12 @@ impl Editor {
             .zip(new_selections.last().cloned())
             .expect("old_selections isn't empty");
 
-        // revert selection
-        let is_selection_reversed = {
-            let should_newest_selection_be_reversed = last_old.start != last_new.start;
-            new_selections.last_mut().expect("checked above").reversed =
-                should_newest_selection_be_reversed;
-            should_newest_selection_be_reversed
+        let is_selection_reversed = if new_selections.len() == 1 {
+            let should_be_reversed = last_old.start != last_new.start;
+            new_selections.last_mut().expect("checked above").reversed = should_be_reversed;
+            should_be_reversed
+        } else {
+            last_new.reversed
         };
 
         if selected_larger_node {
@@ -23989,6 +23989,7 @@ impl Editor {
                 }
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
                 cx.emit(EditorEvent::Reparsed(*buffer_id));
+                self.update_edit_prediction_settings(cx);
                 cx.notify();
             }
             multi_buffer::Event::DirtyChanged => cx.emit(EditorEvent::DirtyChanged),

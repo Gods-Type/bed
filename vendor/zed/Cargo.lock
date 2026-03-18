@@ -9759,7 +9759,7 @@ dependencies = [
 [[package]]
 name = "libwebrtc"
 version = "0.3.26"
-source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=cf4375b244ebb51702968df7fc36e192d0f45ad5#cf4375b244ebb51702968df7fc36e192d0f45ad5"
+source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=c1209aa155cbf4543383774f884a46ae7e53ee2e#c1209aa155cbf4543383774f884a46ae7e53ee2e"
 dependencies = [
  "cxx",
  "glib",
@@ -9857,7 +9857,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "livekit"
 version = "0.7.32"
-source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=cf4375b244ebb51702968df7fc36e192d0f45ad5#cf4375b244ebb51702968df7fc36e192d0f45ad5"
+source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=c1209aa155cbf4543383774f884a46ae7e53ee2e#c1209aa155cbf4543383774f884a46ae7e53ee2e"
 dependencies = [
  "base64 0.22.1",
  "bmrng",
@@ -9883,7 +9883,7 @@ dependencies = [
 [[package]]
 name = "livekit-api"
 version = "0.4.14"
-source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=cf4375b244ebb51702968df7fc36e192d0f45ad5#cf4375b244ebb51702968df7fc36e192d0f45ad5"
+source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=c1209aa155cbf4543383774f884a46ae7e53ee2e#c1209aa155cbf4543383774f884a46ae7e53ee2e"
 dependencies = [
  "base64 0.21.7",
  "futures-util",
@@ -9910,7 +9910,7 @@ dependencies = [
 [[package]]
 name = "livekit-protocol"
 version = "0.7.1"
-source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=cf4375b244ebb51702968df7fc36e192d0f45ad5#cf4375b244ebb51702968df7fc36e192d0f45ad5"
+source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=c1209aa155cbf4543383774f884a46ae7e53ee2e#c1209aa155cbf4543383774f884a46ae7e53ee2e"
 dependencies = [
  "futures-util",
  "livekit-runtime",
@@ -9926,7 +9926,7 @@ dependencies = [
 [[package]]
 name = "livekit-runtime"
 version = "0.4.0"
-source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=cf4375b244ebb51702968df7fc36e192d0f45ad5#cf4375b244ebb51702968df7fc36e192d0f45ad5"
+source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=c1209aa155cbf4543383774f884a46ae7e53ee2e#c1209aa155cbf4543383774f884a46ae7e53ee2e"
 dependencies = [
  "tokio",
  "tokio-stream",
@@ -15849,6 +15849,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "sidebar"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "action_log",
+ "agent",
+ "agent-client-protocol",
+ "agent_ui",
+ "anyhow",
+ "assistant_text_thread",
+ "chrono",
+ "editor",
+ "feature_flags",
+ "fs",
+ "git",
+ "gpui",
+ "language_model",
+ "menu",
+ "pretty_assertions",
+ "project",
+ "prompt_store",
+ "recent_projects",
+ "serde_json",
+ "settings",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "signal-hook"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -17695,6 +17727,7 @@ dependencies = [
  "client",
  "cloud_api_types",
  "db",
+ "feature_flags",
  "git_ui",
  "gpui",
  "notifications",
@@ -19954,7 +19987,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.23"
-source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=cf4375b244ebb51702968df7fc36e192d0f45ad5#cf4375b244ebb51702968df7fc36e192d0f45ad5"
+source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=c1209aa155cbf4543383774f884a46ae7e53ee2e#c1209aa155cbf4543383774f884a46ae7e53ee2e"
 dependencies = [
  "cc",
  "cxx",
@@ -19968,7 +20001,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys-build"
 version = "0.3.13"
-source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=cf4375b244ebb51702968df7fc36e192d0f45ad5#cf4375b244ebb51702968df7fc36e192d0f45ad5"
+source = "git+https://github.com/zed-industries/livekit-rust-sdks?rev=c1209aa155cbf4543383774f884a46ae7e53ee2e#c1209aa155cbf4543383774f884a46ae7e53ee2e"
 dependencies = [
  "anyhow",
  "fs2",
@@ -21921,6 +21954,7 @@ dependencies = [
  "settings_profile_selector",
  "settings_ui",
  "shellexpand 2.1.2",
+ "sidebar",
  "smol",
  "snippet_provider",
  "snippets_ui",
