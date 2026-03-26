@@ -23,8 +23,9 @@ use gpui::{
     uniform_list,
 };
 use itertools::Itertools;
-use language::language_settings::language_settings;
+use language::language_settings::LanguageSettings;
 use language::{Anchor, BufferId, BufferSnapshot, OffsetRangeExt, OutlineItem};
+
 use menu::{Cancel, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use std::{
     cmp,
@@ -236,7 +237,8 @@ impl SearchState {
                         }
                         let style = chunk
                             .syntax_highlight_id
-                            .and_then(|highlight| highlight.style(&theme));
+                            .and_then(|highlight| theme.get(highlight).cloned());
+
                         if let Some(style) = style {
                             let start = context_text.len();
                             let end = start + chunk.text.len();
@@ -855,12 +857,8 @@ impl OutlinePanel {
                                     .read(cx)
                                     .buffer_for_id(*buffer_id, cx)?;
                                 let buffer = buffer.read(cx);
-                                let doc_symbols = language_settings(
-                                    buffer.language().map(|l| l.name()),
-                                    buffer.file(),
-                                    cx,
-                                )
-                                .document_symbols;
+                                let doc_symbols =
+                                    LanguageSettings::for_buffer(buffer, cx).document_symbols;
                                 Some((*buffer_id, doc_symbols))
                             })
                             .collect();
