@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 use settings::Settings;
 use smallvec::SmallVec;
 use std::{mem, sync::Arc};
-use theme::{ActiveTheme, ThemeSettings};
+use theme::ActiveTheme;
+use theme_settings::ThemeSettings;
 use ui::{
     Avatar, AvatarAvailabilityIndicator, ContextMenu, CopyButton, Facepile, HighlightedLabel,
     IconButtonShape, Indicator, ListHeader, ListItem, Tab, Tooltip, prelude::*, tooltip_container,
@@ -2749,7 +2750,7 @@ impl CollabPanel {
                                 .tooltip(Tooltip::text(if self.filter_active_channels {
                                     "Show All Channels"
                                 } else {
-                                    "Show Active Channels"
+                                    "Show Occupied Channels"
                                 })),
                         )
                         .child(
