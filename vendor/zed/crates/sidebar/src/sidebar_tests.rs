@@ -5,7 +5,6 @@ use agent_ui::{
     test_support::{active_session_id, open_thread_with_connection, send_message},
     thread_metadata_store::ThreadMetadata,
 };
-use assistant_text_thread::TextThreadStore;
 use chrono::DateTime;
 use feature_flags::FeatureFlagAppExt as _;
 use fs::FakeFs;
@@ -28,6 +27,28 @@ fn init_test(cx: &mut TestAppContext) {
         language_model::LanguageModelRegistry::test(cx);
         prompt_store::init(cx);
     });
+}
+
+#[track_caller]
+fn assert_active_thread(sidebar: &Sidebar, session_id: &acp::SessionId, msg: &str) {
+    assert!(
+        sidebar
+            .active_entry
+            .as_ref()
+            .is_some_and(|e| e.is_active_thread(session_id)),
+        "{msg}: expected active_entry to be Thread({session_id:?}), got {:?}",
+        sidebar.active_entry,
+    );
+}
+
+#[track_caller]
+fn assert_active_draft(sidebar: &Sidebar, workspace: &Entity<Workspace>, msg: &str) {
+    assert!(
+        matches!(&sidebar.active_entry, Some(ActiveEntry::Draft(ws)) if ws == workspace),
+        "{msg}: expected active_entry to be Draft for workspace {:?}, got {:?}",
+        workspace.entity_id(),
+        sidebar.active_entry,
+    );
 }
 
 fn has_thread_entry(sidebar: &Sidebar, session_id: &acp::SessionId) -> bool {
@@ -70,10 +91,10 @@ async fn save_n_test_threads(count: u32, path_list: &PathList, cx: &mut gpui::Vi
             acp::SessionId::new(Arc::from(format!("thread-{}", i))),
             format!("Thread {}", i + 1).into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, i).unwrap(),
+            None,
             path_list.clone(),
             cx,
         )
-        .await;
     }
     cx.run_until_parked();
 }
@@ -87,10 +108,10 @@ async fn save_test_thread_metadata(
         session_id.clone(),
         "Test".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        None,
         path_list,
         cx,
     )
-    .await;
 }
 
 async fn save_named_thread_metadata(
@@ -103,17 +124,18 @@ async fn save_named_thread_metadata(
         acp::SessionId::new(Arc::from(session_id)),
         SharedString::from(title.to_string()),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        None,
         path_list.clone(),
         cx,
-    )
-    .await;
+    );
     cx.run_until_parked();
 }
 
-async fn save_thread_metadata(
+fn save_thread_metadata(
     session_id: acp::SessionId,
     title: SharedString,
     updated_at: DateTime<Utc>,
+    created_at: Option<DateTime<Utc>>,
     path_list: PathList,
     cx: &mut TestAppContext,
 ) {
@@ -122,12 +144,12 @@ async fn save_thread_metadata(
         agent_id: agent::ZED_AGENT_ID.clone(),
         title,
         updated_at,
-        created_at: None,
+        created_at,
         folder_paths: path_list,
         archived: false,
     };
     cx.update(|cx| {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save_manually(metadata, cx))
     });
     cx.run_until_parked();
 }
@@ -244,6 +266,97 @@ fn visible_entries_as_strings(
     })
 }
 
+#[gpui::test]
+async fn test_serialization_round_trip(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
+    save_n_test_threads(3, &path_list, cx).await;
+
+    // Set a custom width, collapse the group, and expand "View More".
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.set_width(Some(px(420.0)), cx);
+        sidebar.toggle_collapse(&path_list, window, cx);
+        sidebar.expanded_groups.insert(path_list.clone(), 2);
+    });
+    cx.run_until_parked();
+
+    // Capture the serialized state from the first sidebar.
+    let serialized = sidebar.read_with(cx, |sidebar, cx| sidebar.serialized_state(cx));
+    let serialized = serialized.expect("serialized_state should return Some");
+
+    // Create a fresh sidebar and restore into it.
+    let sidebar2 =
+        cx.update(|window, cx| cx.new(|cx| Sidebar::new(multi_workspace.clone(), window, cx)));
+    cx.run_until_parked();
+
+    sidebar2.update_in(cx, |sidebar, window, cx| {
+        sidebar.restore_serialized_state(&serialized, window, cx);
+    });
+    cx.run_until_parked();
+
+    // Assert all serialized fields match.
+    let (width1, collapsed1, expanded1) = sidebar.read_with(cx, |s, _| {
+        (
+            s.width,
+            s.collapsed_groups.clone(),
+            s.expanded_groups.clone(),
+        )
+    });
+    let (width2, collapsed2, expanded2) = sidebar2.read_with(cx, |s, _| {
+        (
+            s.width,
+            s.collapsed_groups.clone(),
+            s.expanded_groups.clone(),
+        )
+    });
+
+    assert_eq!(width1, width2);
+    assert_eq!(collapsed1, collapsed2);
+    assert_eq!(expanded1, expanded2);
+    assert_eq!(width1, px(420.0));
+    assert!(collapsed1.contains(&path_list));
+    assert_eq!(expanded1.get(&path_list), Some(&2));
+}
+
+#[gpui::test]
+async fn test_restore_serialized_archive_view_does_not_panic(cx: &mut TestAppContext) {
+    // A regression test to ensure that restoring a serialized archive view does not panic.
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    cx.update(|_window, cx| {
+        AgentRegistryStore::init_test_global(cx, vec![]);
+    });
+
+    let serialized = serde_json::to_string(&SerializedSidebar {
+        width: Some(400.0),
+        collapsed_groups: Vec::new(),
+        expanded_groups: Vec::new(),
+        active_view: SerializedSidebarView::Archive,
+    })
+    .expect("serialization should succeed");
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        if let Some(sidebar) = multi_workspace.sidebar() {
+            sidebar.restore_serialized_state(&serialized, window, cx);
+        }
+    });
+    cx.run_until_parked();
+
+    // After the deferred `show_archive` runs, the view should be Archive.
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert!(
+            matches!(sidebar.view, SidebarView::Archive(_)),
+            "expected sidebar view to be Archive after restore, got ThreadList"
+        );
+    });
+}
+
 #[test]
 fn test_clean_mention_links() {
     // Simple mention link
@@ -329,19 +442,19 @@ async fn test_single_workspace_with_saved_threads(cx: &mut TestAppContext) {
         acp::SessionId::new(Arc::from("thread-1")),
         "Fix crash in project panel".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap(),
+        None,
         path_list.clone(),
         cx,
-    )
-    .await;
+    );
 
     save_thread_metadata(
         acp::SessionId::new(Arc::from("thread-2")),
         "Add inline diff view".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
-        path_list.clone(),
+        None,
+        path_list,
         cx,
-    )
-    .await;
+    );
     cx.run_until_parked();
 
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
@@ -371,10 +484,10 @@ async fn test_workspace_lifecycle(cx: &mut TestAppContext) {
         acp::SessionId::new(Arc::from("thread-a1")),
         "Thread A1".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
-        path_list.clone(),
+        None,
+        path_list,
         cx,
-    )
-    .await;
+    );
     cx.run_until_parked();
 
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
@@ -1106,12 +1219,10 @@ async fn init_test_project_with_agent_panel(
 
 fn add_agent_panel(
     workspace: &Entity<Workspace>,
-    project: &Entity<project::Project>,
     cx: &mut gpui::VisualTestContext,
 ) -> Entity<AgentPanel> {
     workspace.update_in(cx, |workspace, window, cx| {
-        let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
-        let panel = cx.new(|cx| AgentPanel::test_new(workspace, text_thread_store, window, cx));
+        let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
         workspace.add_panel(panel.clone(), window, cx);
         panel
     })
@@ -1119,12 +1230,11 @@ fn add_agent_panel(
 
 fn setup_sidebar_with_agent_panel(
     multi_workspace: &Entity<MultiWorkspace>,
-    project: &Entity<project::Project>,
     cx: &mut gpui::VisualTestContext,
 ) -> (Entity<Sidebar>, Entity<AgentPanel>) {
     let sidebar = setup_sidebar(multi_workspace, cx);
     let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
-    let panel = add_agent_panel(&workspace, project, cx);
+    let panel = add_agent_panel(&workspace, cx);
     (sidebar, panel)
 }
 
@@ -1133,7 +1243,7 @@ async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, &project, cx);
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
     let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
 
@@ -1179,7 +1289,7 @@ async fn test_background_thread_completion_triggers_notification(cx: &mut TestAp
     let project_a = init_test_project_with_agent_panel("/project-a", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
-    let (sidebar, panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, &project_a, cx);
+    let (sidebar, panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
     let path_list_a = PathList::new(&[std::path::PathBuf::from("/project-a")]);
 
@@ -1253,10 +1363,10 @@ async fn test_search_narrows_visible_threads_to_matches(cx: &mut TestAppContext)
             acp::SessionId::new(Arc::from(id)),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0).unwrap(),
+            None,
             path_list.clone(),
             cx,
-        )
-        .await;
+        );
     }
     cx.run_until_parked();
 
@@ -1301,10 +1411,10 @@ async fn test_search_matches_regardless_of_case(cx: &mut TestAppContext) {
         acp::SessionId::new(Arc::from("thread-1")),
         "Fix Crash In Project Panel".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
-        path_list.clone(),
+        None,
+        path_list,
         cx,
-    )
-    .await;
+    );
     cx.run_until_parked();
 
     // Lowercase query matches mixed-case title.
@@ -1344,10 +1454,10 @@ async fn test_escape_clears_search_and_restores_full_list(cx: &mut TestAppContex
             acp::SessionId::new(Arc::from(id)),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0).unwrap(),
+            None,
             path_list.clone(),
             cx,
         )
-        .await;
     }
     cx.run_until_parked();
 
@@ -1396,10 +1506,10 @@ async fn test_search_only_shows_workspace_headers_with_matches(cx: &mut TestAppC
             acp::SessionId::new(Arc::from(id)),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0).unwrap(),
+            None,
             path_list_a.clone(),
             cx,
         )
-        .await;
     }
 
     // Add a second workspace.
@@ -1418,10 +1528,10 @@ async fn test_search_only_shows_workspace_headers_with_matches(cx: &mut TestAppC
             acp::SessionId::new(Arc::from(id)),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0).unwrap(),
+            None,
             path_list_b.clone(),
             cx,
         )
-        .await;
     }
     cx.run_until_parked();
 
@@ -1478,10 +1588,10 @@ async fn test_search_matches_workspace_name(cx: &mut TestAppContext) {
             acp::SessionId::new(Arc::from(id)),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0).unwrap(),
+            None,
             path_list_a.clone(),
             cx,
         )
-        .await;
     }
 
     // Add a second workspace.
@@ -1500,10 +1610,10 @@ async fn test_search_matches_workspace_name(cx: &mut TestAppContext) {
             acp::SessionId::new(Arc::from(id)),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0).unwrap(),
+            None,
             path_list_b.clone(),
             cx,
         )
-        .await;
     }
     cx.run_until_parked();
 
@@ -1584,10 +1694,10 @@ async fn test_search_finds_threads_hidden_behind_view_more(cx: &mut TestAppConte
             acp::SessionId::new(Arc::from(format!("thread-{}", i))),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, i).unwrap(),
+            None,
             path_list.clone(),
             cx,
         )
-        .await;
     }
     cx.run_until_parked();
 
@@ -1628,10 +1738,10 @@ async fn test_search_finds_threads_inside_collapsed_groups(cx: &mut TestAppConte
         acp::SessionId::new(Arc::from("thread-1")),
         "Important thread".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
-        path_list.clone(),
+        None,
+        path_list,
         cx,
-    )
-    .await;
+    );
     cx.run_until_parked();
 
     // User focuses the sidebar and collapses the group using keyboard:
@@ -1674,10 +1784,10 @@ async fn test_search_then_keyboard_navigate_and_confirm(cx: &mut TestAppContext)
             acp::SessionId::new(Arc::from(id)),
             title.into(),
             chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0).unwrap(),
+            None,
             path_list.clone(),
             cx,
         )
-        .await;
     }
     cx.run_until_parked();
 
@@ -1736,10 +1846,10 @@ async fn test_confirm_on_historical_thread_activates_workspace(cx: &mut TestAppC
         acp::SessionId::new(Arc::from("hist-1")),
         "Historical Thread".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 1, 0, 0, 0).unwrap(),
-        path_list.clone(),
+        None,
+        path_list,
         cx,
-    )
-    .await;
+    );
     cx.run_until_parked();
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
     cx.run_until_parked();
@@ -1789,19 +1899,19 @@ async fn test_click_clears_selection_and_focus_in_restores_it(cx: &mut TestAppCo
         acp::SessionId::new(Arc::from("t-1")),
         "Thread A".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
+        None,
         path_list.clone(),
         cx,
-    )
-    .await;
+    );
 
     save_thread_metadata(
         acp::SessionId::new(Arc::from("t-2")),
         "Thread B".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
-        path_list.clone(),
+        None,
+        path_list,
         cx,
-    )
-    .await;
+    );
 
     cx.run_until_parked();
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
@@ -1845,7 +1955,7 @@ async fn test_thread_title_update_propagates_to_sidebar(cx: &mut TestAppContext)
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, &project, cx);
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
     let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
 
@@ -1893,7 +2003,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     let project_a = init_test_project_with_agent_panel("/project-a", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
-    let (sidebar, panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, &project_a, cx);
+    let (sidebar, panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
     let path_list_a = PathList::new(&[std::path::PathBuf::from("/project-a")]);
 
@@ -1916,17 +2026,17 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
         mw.test_add_workspace(project_b.clone(), window, cx)
     });
-    let panel_b = add_agent_panel(&workspace_b, &project_b, cx);
+    let panel_b = add_agent_panel(&workspace_b, cx);
     cx.run_until_parked();
 
     let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspaces()[0].clone());
 
     // ── 1. Initial state: focused thread derived from active panel ─────
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_a),
-            "The active panel's thread should be focused on startup"
+        assert_active_thread(
+            sidebar,
+            &session_id_a,
+            "The active panel's thread should be focused on startup",
         );
     });
 
@@ -1949,10 +2059,10 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_a),
-            "After clicking a thread, it should be the focused thread"
+        assert_active_thread(
+            sidebar,
+            &session_id_a,
+            "After clicking a thread, it should be the focused thread",
         );
         assert!(
             has_thread_entry(sidebar, &session_id_a),
@@ -2004,10 +2114,10 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_b),
-            "Clicking a thread in another workspace should focus that thread"
+        assert_active_thread(
+            sidebar,
+            &session_id_b,
+            "Clicking a thread in another workspace should focus that thread",
         );
         assert!(
             has_thread_entry(sidebar, &session_id_b),
@@ -2022,10 +2132,10 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_a),
-            "Switching workspace should seed focused_thread from the new active panel"
+        assert_active_thread(
+            sidebar,
+            &session_id_a,
+            "Switching workspace should seed focused_thread from the new active panel",
         );
         assert!(
             has_thread_entry(sidebar, &session_id_a),
@@ -2048,10 +2158,10 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     // This prevents running threads in background workspaces from causing
     // the selection highlight to jump around.
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_a),
-            "Opening a thread in a non-active panel should not change focused_thread"
+        assert_active_thread(
+            sidebar,
+            &session_id_a,
+            "Opening a thread in a non-active panel should not change focused_thread",
         );
     });
 
@@ -2061,10 +2171,10 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_a),
-            "Defocusing the sidebar should not change focused_thread"
+        assert_active_thread(
+            sidebar,
+            &session_id_a,
+            "Defocusing the sidebar should not change focused_thread",
         );
     });
 
@@ -2079,10 +2189,10 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_b2),
-            "Switching workspace should seed focused_thread from the new active panel"
+        assert_active_thread(
+            sidebar,
+            &session_id_b2,
+            "Switching workspace should seed focused_thread from the new active panel",
         );
         assert!(
             has_thread_entry(sidebar, &session_id_b2),
@@ -2102,10 +2212,10 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id_b2),
-            "Focusing the agent panel thread should set focused_thread"
+        assert_active_thread(
+            sidebar,
+            &session_id_b2,
+            "Focusing the agent panel thread should set focused_thread",
         );
         assert!(
             has_thread_entry(sidebar, &session_id_b2),
@@ -2120,7 +2230,7 @@ async fn test_new_thread_button_works_after_adding_folder(cx: &mut TestAppContex
     let fs = cx.update(|cx| <dyn fs::Fs>::global(cx));
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, &project, cx);
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
     let path_list_a = PathList::new(&[std::path::PathBuf::from("/project-a")]);
 
@@ -2143,10 +2253,11 @@ async fn test_new_thread_button_works_after_adding_folder(cx: &mut TestAppContex
 
     // The "New Thread" button should NOT be in "active/draft" state
     // because the panel has a thread with messages.
-    sidebar.read_with(cx, |sidebar, cx| {
+    sidebar.read_with(cx, |sidebar, _cx| {
         assert!(
-            !sidebar.active_thread_is_draft(cx),
-            "Panel has a thread with messages, so it should not be a draft"
+            matches!(&sidebar.active_entry, Some(ActiveEntry::Thread { .. })),
+            "Panel has a thread with messages, so active_entry should be Thread, got {:?}",
+            sidebar.active_entry,
         );
     });
 
@@ -2162,24 +2273,23 @@ async fn test_new_thread_button_works_after_adding_folder(cx: &mut TestAppContex
         .expect("should add worktree");
     cx.run_until_parked();
 
-    // The workspace path_list is now [project-a, project-b]. The old
-    // thread was stored under [project-a], so it no longer appears in
-    // the sidebar list for this workspace.
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    assert!(
-        !entries.iter().any(|e| e.contains("Hello")),
-        "Thread stored under the old path_list should not appear: {:?}",
-        entries
+    // The workspace path_list is now [project-a, project-b]. The active
+    // thread's metadata was re-saved with the new paths by the agent panel's
+    // project subscription, so it stays visible under the updated group.
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [project-a, project-b]", "  Hello *",]
     );
 
     // The "New Thread" button must still be clickable (not stuck in
     // "active/draft" state). Verify that `active_thread_is_draft` is
     // false — the panel still has the old thread with messages.
-    sidebar.read_with(cx, |sidebar, cx| {
+    sidebar.read_with(cx, |sidebar, _cx| {
         assert!(
-            !sidebar.active_thread_is_draft(cx),
+            matches!(&sidebar.active_entry, Some(ActiveEntry::Thread { .. })),
             "After adding a folder the panel still has a thread with messages, \
-                 so active_thread_is_draft should be false"
+                 so active_entry should be Thread, got {:?}",
+            sidebar.active_entry,
         );
     });
 
@@ -2193,10 +2303,11 @@ async fn test_new_thread_button_works_after_adding_folder(cx: &mut TestAppContex
 
     // After creating a new thread, the panel should now be in draft
     // state (no messages on the new thread).
-    sidebar.read_with(cx, |sidebar, cx| {
-        assert!(
-            sidebar.active_thread_is_draft(cx),
-            "After creating a new thread the panel should be in draft state"
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert_active_draft(
+            sidebar,
+            &workspace,
+            "After creating a new thread active_entry should be Draft",
         );
     });
 }
@@ -2210,7 +2321,7 @@ async fn test_cmd_n_shows_new_thread_entry(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, &project, cx);
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
     let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
 
@@ -2247,14 +2358,59 @@ async fn test_cmd_n_shows_new_thread_entry(cx: &mut TestAppContext) {
         "After Cmd-N the sidebar should show a highlighted New Thread entry"
     );
 
-    sidebar.read_with(cx, |sidebar, cx| {
-        assert!(
-            sidebar.focused_thread.is_none(),
-            "focused_thread should be cleared after Cmd-N"
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert_active_draft(
+            sidebar,
+            &workspace,
+            "active_entry should be Draft after Cmd-N",
         );
-        assert!(
-            sidebar.active_thread_is_draft(cx),
-            "the new blank thread should be a draft"
+    });
+}
+
+#[gpui::test]
+async fn test_draft_with_server_session_shows_as_draft(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+
+    let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
+
+    // Create a saved thread so the workspace has history.
+    let connection = StubAgentConnection::new();
+    connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+        acp::ContentChunk::new("Done".into()),
+    )]);
+    open_thread_with_connection(&panel, connection, cx);
+    send_message(&panel, cx);
+    let saved_session_id = active_session_id(&panel, cx);
+    save_test_thread_metadata(&saved_session_id, path_list.clone(), cx).await;
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  Hello *"]
+    );
+
+    // Open a new draft thread via a server connection. This gives the
+    // conversation a parent_id (session assigned by the server) but
+    // no messages have been sent, so active_thread_is_draft() is true.
+    let draft_connection = StubAgentConnection::new();
+    open_thread_with_connection(&panel, draft_connection, cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  [+ New Thread]", "  Hello *"],
+        "Draft with a server session should still show as [+ New Thread]"
+    );
+
+    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert_active_draft(
+            sidebar,
+            &workspace,
+            "Draft with server session should be Draft, not Thread",
         );
     });
 }
@@ -2307,6 +2463,7 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -2330,7 +2487,7 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
         mw.test_add_workspace(worktree_project.clone(), window, cx)
     });
 
-    let worktree_panel = add_agent_panel(&worktree_workspace, &worktree_project, cx);
+    let worktree_panel = add_agent_panel(&worktree_workspace, cx);
 
     // Switch to the worktree workspace.
     multi_workspace.update_in(cx, |mw, window, cx| {
@@ -2383,14 +2540,11 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
              a highlighted New Thread entry under the main repo header"
     );
 
-    sidebar.read_with(cx, |sidebar, cx| {
-        assert!(
-            sidebar.focused_thread.is_none(),
-            "focused_thread should be cleared after Cmd-N"
-        );
-        assert!(
-            sidebar.active_thread_is_draft(cx),
-            "the new blank thread should be a draft"
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert_active_draft(
+            sidebar,
+            &worktree_workspace,
+            "active_entry should be Draft after Cmd-N",
         );
     });
 }
@@ -2424,6 +2578,7 @@ async fn test_search_matches_worktree_name(cx: &mut TestAppContext) {
                 path: std::path::PathBuf::from("/wt/rosewood"),
                 ref_name: Some("refs/heads/rosewood".into()),
                 sha: "abc".into(),
+                is_main: false,
             });
         })
         .unwrap();
@@ -2485,6 +2640,7 @@ async fn test_git_worktree_added_live_updates_sidebar(cx: &mut TestAppContext) {
                 path: std::path::PathBuf::from("/wt/rosewood"),
                 ref_name: Some("refs/heads/rosewood".into()),
                 sha: "abc".into(),
+                is_main: false,
             });
         })
         .unwrap();
@@ -2586,11 +2742,13 @@ async fn test_two_worktree_workspaces_absorbed_when_main_added(cx: &mut TestAppC
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
         state.worktrees.push(git::repository::Worktree {
             path: std::path::PathBuf::from("/wt-feature-b"),
             ref_name: Some("refs/heads/feature-b".into()),
             sha: "bbb".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -2668,11 +2826,13 @@ async fn test_threadless_workspace_shows_new_thread_with_worktree_chip(cx: &mut 
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
         state.worktrees.push(git::repository::Worktree {
             path: std::path::PathBuf::from("/wt-feature-b"),
             ref_name: Some("refs/heads/feature-b".into()),
             sha: "bbb".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -2788,6 +2948,7 @@ async fn test_multi_worktree_thread_shows_multiple_chips(cx: &mut TestAppContext
                     path: std::path::PathBuf::from(format!("/worktrees/{repo}/{branch}/{repo}")),
                     ref_name: Some(format!("refs/heads/{branch}").into()),
                     sha: "aaa".into(),
+                    is_main: false,
                 });
             }
         })
@@ -2890,6 +3051,7 @@ async fn test_same_named_worktree_chips_are_deduplicated(cx: &mut TestAppContext
                 path: std::path::PathBuf::from(format!("/worktrees/{repo}/olivetti/{repo}")),
                 ref_name: Some("refs/heads/olivetti".into()),
                 sha: "aaa".into(),
+                is_main: false,
             });
         })
         .unwrap();
@@ -2980,6 +3142,7 @@ async fn test_absorbed_worktree_running_thread_shows_live_status(cx: &mut TestAp
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -3006,7 +3169,7 @@ async fn test_absorbed_worktree_running_thread_shows_live_status(cx: &mut TestAp
 
     // Add an agent panel to the worktree workspace so we can run a
     // thread inside it.
-    let worktree_panel = add_agent_panel(&worktree_workspace, &worktree_project, cx);
+    let worktree_panel = add_agent_panel(&worktree_workspace, cx);
 
     // Switch back to the main workspace before setting up the sidebar.
     multi_workspace.update_in(cx, |mw, window, cx| {
@@ -3095,6 +3258,7 @@ async fn test_absorbed_worktree_completion_triggers_notification(cx: &mut TestAp
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -3118,7 +3282,7 @@ async fn test_absorbed_worktree_completion_triggers_notification(cx: &mut TestAp
         mw.test_add_workspace(worktree_project.clone(), window, cx)
     });
 
-    let worktree_panel = add_agent_panel(&worktree_workspace, &worktree_project, cx);
+    let worktree_panel = add_agent_panel(&worktree_workspace, cx);
 
     multi_workspace.update_in(cx, |mw, window, cx| {
         let workspace = mw.workspaces()[0].clone();
@@ -3201,6 +3365,7 @@ async fn test_clicking_worktree_thread_opens_workspace_when_none_exists(cx: &mut
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -3306,6 +3471,7 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -3456,6 +3622,7 @@ async fn test_clicking_absorbed_worktree_thread_activates_worktree_workspace(
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -3840,8 +4007,8 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
         "should activate the window that already owns the matching workspace"
     );
     sidebar.read_with(cx_a, |sidebar, _| {
-            assert_eq!(
-                sidebar.focused_thread, None,
+            assert!(
+                !matches!(&sidebar.active_entry, Some(ActiveEntry::Thread { session_id: id, .. }) if id == &session_id),
                 "source window's sidebar should not eagerly claim focus for a thread opened in another window"
             );
         });
@@ -3876,7 +4043,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
     let cx_b = &mut gpui::VisualTestContext::from_window(multi_workspace_b.into(), cx);
     let sidebar_b = setup_sidebar(&multi_workspace_b_entity, cx_b);
     let workspace_b = multi_workspace_b_entity.read_with(cx_b, |mw, _| mw.workspace().clone());
-    let _panel_b = add_agent_panel(&workspace_b, &project_b, cx_b);
+    let _panel_b = add_agent_panel(&workspace_b, cx_b);
 
     let session_id = acp::SessionId::new(Arc::from("archived-cross-window-with-sidebar"));
 
@@ -3916,16 +4083,16 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
         "should activate the window that already owns the matching workspace"
     );
     sidebar_a.read_with(cx_a, |sidebar, _| {
-            assert_eq!(
-                sidebar.focused_thread, None,
+            assert!(
+                !matches!(&sidebar.active_entry, Some(ActiveEntry::Thread { session_id: id, .. }) if id == &session_id),
                 "source window's sidebar should not eagerly claim focus for a thread opened in another window"
             );
         });
     sidebar_b.read_with(cx_b, |sidebar, _| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id),
-            "target window's sidebar should eagerly focus the activated archived thread"
+        assert_active_thread(
+            sidebar,
+            &session_id,
+            "target window's sidebar should eagerly focus the activated archived thread",
         );
     });
 }
@@ -3977,10 +4144,10 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
         "should keep activation in the current window when it already has a matching workspace"
     );
     sidebar_a.read_with(cx_a, |sidebar, _| {
-        assert_eq!(
-            sidebar.focused_thread.as_ref(),
-            Some(&session_id),
-            "current window's sidebar should eagerly focus the activated archived thread"
+        assert_active_thread(
+            sidebar,
+            &session_id,
+            "current window's sidebar should eagerly focus the activated archived thread",
         );
     });
     assert_eq!(
@@ -4050,6 +4217,7 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -4082,8 +4250,8 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
     let sidebar = setup_sidebar(&multi_workspace, cx);
 
     let main_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspaces()[0].clone());
-    let main_panel = add_agent_panel(&main_workspace, &main_project, cx);
-    let _worktree_panel = add_agent_panel(&worktree_workspace, &worktree_project, cx);
+    let main_panel = add_agent_panel(&main_workspace, cx);
+    let _worktree_panel = add_agent_panel(&worktree_workspace, cx);
 
     // Open Thread 2 in the main panel and keep it running.
     let connection = StubAgentConnection::new();
@@ -4105,22 +4273,22 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
         thread2_session_id.clone(),
         "Thread 2".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
+        None,
         PathList::new(&[std::path::PathBuf::from("/project")]),
         cx,
-    )
-    .await;
+    );
 
     // Save thread 1's metadata with the worktree path and an older timestamp so
     // it sorts below thread 2. archive_thread will find it as the "next" candidate.
     let thread1_session_id = acp::SessionId::new(Arc::from("thread1-worktree-session"));
     save_thread_metadata(
-        thread1_session_id.clone(),
+        thread1_session_id,
         "Thread 1".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        None,
         PathList::new(&[std::path::PathBuf::from("/wt-feature-a")]),
         cx,
-    )
-    .await;
+    );
 
     cx.run_until_parked();
 
@@ -4134,13 +4302,13 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
 
     // The sidebar should track T2 as the focused thread (derived from the
     // main panel's active view).
-    let focused = sidebar.read_with(cx, |s, _| s.focused_thread.clone());
-    assert_eq!(
-        focused,
-        Some(thread2_session_id.clone()),
-        "focused thread should be Thread 2 before archiving: {:?}",
-        focused
-    );
+    sidebar.read_with(cx, |s, _| {
+        assert_active_thread(
+            s,
+            &thread2_session_id,
+            "focused thread should be Thread 2 before archiving",
+        );
+    });
 
     // Archive thread 2.
     sidebar.update_in(cx, |sidebar, window, cx| {
@@ -4221,6 +4389,7 @@ async fn test_linked_worktree_threads_not_duplicated_across_groups(cx: &mut Test
             path: std::path::PathBuf::from("/wt-feature-a"),
             ref_name: Some("refs/heads/feature-a".into()),
             sha: "aaa".into(),
+            is_main: false,
         });
     })
     .unwrap();
@@ -4273,7 +4442,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, &project, cx);
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
     let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
 
@@ -4318,26 +4487,14 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     open_thread_with_connection(&panel, connection_c, cx);
     send_message(&panel, cx);
     let session_id_c = active_session_id(&panel, cx);
-    cx.update(|_, cx| {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-            store.save(
-                ThreadMetadata {
-                    session_id: session_id_c.clone(),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
-                    title: "Thread C".into(),
-                    updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0)
-                        .unwrap(),
-                    created_at: Some(
-                        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
-                    ),
-                    folder_paths: path_list.clone(),
-                    archived: false,
-                },
-                cx,
-            )
-        })
-    });
-    cx.run_until_parked();
+    save_thread_metadata(
+        session_id_c.clone(),
+        "Thread C".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap()),
+        path_list.clone(),
+        cx,
+    );
 
     let connection_b = StubAgentConnection::new();
     connection_b.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
@@ -4346,26 +4503,14 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     open_thread_with_connection(&panel, connection_b, cx);
     send_message(&panel, cx);
     let session_id_b = active_session_id(&panel, cx);
-    cx.update(|_, cx| {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-            store.save(
-                ThreadMetadata {
-                    session_id: session_id_b.clone(),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
-                    title: "Thread B".into(),
-                    updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0)
-                        .unwrap(),
-                    created_at: Some(
-                        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
-                    ),
-                    folder_paths: path_list.clone(),
-                    archived: false,
-                },
-                cx,
-            )
-        })
-    });
-    cx.run_until_parked();
+    save_thread_metadata(
+        session_id_b.clone(),
+        "Thread B".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
+        Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap()),
+        path_list.clone(),
+        cx,
+    );
 
     let connection_a = StubAgentConnection::new();
     connection_a.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
@@ -4374,26 +4519,14 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     open_thread_with_connection(&panel, connection_a, cx);
     send_message(&panel, cx);
     let session_id_a = active_session_id(&panel, cx);
-    cx.update(|_, cx| {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-            store.save(
-                ThreadMetadata {
-                    session_id: session_id_a.clone(),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
-                    title: "Thread A".into(),
-                    updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0)
-                        .unwrap(),
-                    created_at: Some(
-                        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap(),
-                    ),
-                    folder_paths: path_list.clone(),
-                    archived: false,
-                },
-                cx,
-            )
-        })
-    });
-    cx.run_until_parked();
+    save_thread_metadata(
+        session_id_a.clone(),
+        "Thread A".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap(),
+        Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap()),
+        path_list.clone(),
+        cx,
+    );
 
     // All three threads are now live. Thread A was opened last, so it's
     // the one being viewed. Opening each thread called record_thread_access,
@@ -4448,6 +4581,8 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(switcher_selected_id(&sidebar, cx), session_id_c);
 
+    assert!(sidebar.update(cx, |sidebar, _cx| sidebar.thread_last_accessed.is_empty()));
+
     // Confirm on Thread C.
     sidebar.update_in(cx, |sidebar, window, cx| {
         let switcher = sidebar.thread_switcher.as_ref().unwrap();
@@ -4464,7 +4599,23 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
         );
     });
 
-    // Re-open switcher: Thread C is now most-recently-accessed.
+    sidebar.update(cx, |sidebar, _cx| {
+        let last_accessed = sidebar
+            .thread_last_accessed
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(last_accessed.len(), 1);
+        assert!(last_accessed.contains(&session_id_c));
+        assert!(
+            sidebar
+                .active_entry
+                .as_ref()
+                .expect("active_entry should be set")
+                .is_active_thread(&session_id_c)
+        );
+    });
+
     sidebar.update_in(cx, |sidebar, window, cx| {
         sidebar.on_toggle_thread_switcher(&ToggleThreadSwitcher::default(), window, cx);
     });
@@ -4479,33 +4630,89 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
         ],
     );
 
-    sidebar.update_in(cx, |sidebar, _window, cx| {
-        sidebar.dismiss_thread_switcher(cx);
+    // Confirm on Thread A.
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        let switcher = sidebar.thread_switcher.as_ref().unwrap();
+        let focus = switcher.focus_handle(cx);
+        focus.dispatch_action(&menu::Confirm, window, cx);
     });
     cx.run_until_parked();
 
-    // ── 3. Add a historical thread (no last_accessed_at, no message sent) ──
-    // This thread was never opened in a panel — it only exists in metadata.
-    cx.update(|_, cx| {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-            store.save(
-                ThreadMetadata {
-                    session_id: acp::SessionId::new(Arc::from("thread-historical")),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
-                    title: "Historical Thread".into(),
-                    updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 1, 0, 0, 0)
-                        .unwrap(),
-                    created_at: Some(
-                        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 1, 0, 0, 0).unwrap(),
-                    ),
-                    folder_paths: path_list.clone(),
-                    archived: false,
-                },
-                cx,
-            )
-        })
+    sidebar.update(cx, |sidebar, _cx| {
+        let last_accessed = sidebar
+            .thread_last_accessed
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(last_accessed.len(), 2);
+        assert!(last_accessed.contains(&session_id_c));
+        assert!(last_accessed.contains(&session_id_a));
+        assert!(
+            sidebar
+                .active_entry
+                .as_ref()
+                .expect("active_entry should be set")
+                .is_active_thread(&session_id_a)
+        );
+    });
+
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.on_toggle_thread_switcher(&ToggleThreadSwitcher::default(), window, cx);
     });
     cx.run_until_parked();
+
+    assert_eq!(
+        switcher_ids(&sidebar, cx),
+        vec![
+            session_id_a.clone(),
+            session_id_c.clone(),
+            session_id_b.clone(),
+        ],
+    );
+
+    sidebar.update_in(cx, |sidebar, _window, cx| {
+        let switcher = sidebar.thread_switcher.as_ref().unwrap();
+        switcher.update(cx, |switcher, cx| switcher.cycle_selection(cx));
+    });
+    cx.run_until_parked();
+
+    // Confirm on Thread B.
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        let switcher = sidebar.thread_switcher.as_ref().unwrap();
+        let focus = switcher.focus_handle(cx);
+        focus.dispatch_action(&menu::Confirm, window, cx);
+    });
+    cx.run_until_parked();
+
+    sidebar.update(cx, |sidebar, _cx| {
+        let last_accessed = sidebar
+            .thread_last_accessed
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(last_accessed.len(), 3);
+        assert!(last_accessed.contains(&session_id_c));
+        assert!(last_accessed.contains(&session_id_a));
+        assert!(last_accessed.contains(&session_id_b));
+        assert!(
+            sidebar
+                .active_entry
+                .as_ref()
+                .expect("active_entry should be set")
+                .is_active_thread(&session_id_b)
+        );
+    });
+
+    // ── 3. Add a historical thread (no last_accessed_at, no message sent) ──
+    // This thread was never opened in a panel — it only exists in metadata.
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("thread-historical")),
+        "Historical Thread".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 1, 0, 0, 0).unwrap(),
+        Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 1, 0, 0, 0).unwrap()),
+        path_list.clone(),
+        cx,
+    );
 
     sidebar.update_in(cx, |sidebar, window, cx| {
         sidebar.on_toggle_thread_switcher(&ToggleThreadSwitcher::default(), window, cx);
@@ -4521,13 +4728,14 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     // last_message_sent_or_queued. So for the accessed threads (tier 1) the
     // sort key is last_accessed_at; for Historical Thread (tier 3) it's created_at.
     let session_id_hist = acp::SessionId::new(Arc::from("thread-historical"));
+
     let ids = switcher_ids(&sidebar, cx);
     assert_eq!(
         ids,
         vec![
-            session_id_c.clone(),
-            session_id_a.clone(),
             session_id_b.clone(),
+            session_id_a.clone(),
+            session_id_c.clone(),
             session_id_hist.clone()
         ],
     );
@@ -4538,26 +4746,14 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     // ── 4. Add another historical thread with older created_at ─────────
-    cx.update(|_, cx| {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-            store.save(
-                ThreadMetadata {
-                    session_id: acp::SessionId::new(Arc::from("thread-old-historical")),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
-                    title: "Old Historical Thread".into(),
-                    updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2023, 6, 1, 0, 0, 0)
-                        .unwrap(),
-                    created_at: Some(
-                        chrono::TimeZone::with_ymd_and_hms(&Utc, 2023, 6, 1, 0, 0, 0).unwrap(),
-                    ),
-                    folder_paths: path_list.clone(),
-                    archived: false,
-                },
-                cx,
-            )
-        })
-    });
-    cx.run_until_parked();
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("thread-old-historical")),
+        "Old Historical Thread".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2023, 6, 1, 0, 0, 0).unwrap(),
+        Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2023, 6, 1, 0, 0, 0).unwrap()),
+        path_list,
+        cx,
+    );
 
     sidebar.update_in(cx, |sidebar, window, cx| {
         sidebar.on_toggle_thread_switcher(&ToggleThreadSwitcher::default(), window, cx);
@@ -4571,9 +4767,9 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     assert_eq!(
         ids,
         vec![
-            session_id_c.clone(),
-            session_id_a.clone(),
-            session_id_b.clone(),
+            session_id_b,
+            session_id_a,
+            session_id_c,
             session_id_hist,
             session_id_old_hist,
         ],
@@ -4598,10 +4794,10 @@ async fn test_archive_thread_keeps_metadata_but_hides_from_sidebar(cx: &mut Test
         acp::SessionId::new(Arc::from("thread-to-archive")),
         "Thread To Archive".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
-        path_list.clone(),
+        None,
+        path_list,
         cx,
-    )
-    .await;
+    );
     cx.run_until_parked();
 
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
@@ -4650,22 +4846,25 @@ async fn test_archived_threads_excluded_from_sidebar_entries(cx: &mut TestAppCon
         acp::SessionId::new(Arc::from("visible-thread")),
         "Visible Thread".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
+        None,
         path_list.clone(),
         cx,
-    )
-    .await;
+    );
+
+    let archived_thread_session_id = acp::SessionId::new(Arc::from("archived-thread"));
+    save_thread_metadata(
+        archived_thread_session_id.clone(),
+        "Archived Thread".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        None,
+        path_list,
+        cx,
+    );
 
     cx.update(|_, cx| {
-        let metadata = ThreadMetadata {
-            session_id: acp::SessionId::new(Arc::from("archived-thread")),
-            agent_id: agent::ZED_AGENT_ID.clone(),
-            title: "Archived Thread".into(),
-            updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
-            created_at: None,
-            folder_paths: path_list.clone(),
-            archived: true,
-        };
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.archive(&archived_thread_session_id, cx)
+        })
     });
     cx.run_until_parked();
 
@@ -4762,6 +4961,7 @@ mod property_test {
         SaveWorktreeThread { worktree_index: usize },
         DeleteThread { index: usize },
         ToggleAgentPanel,
+        CreateDraftThread,
         AddWorkspace,
         OpenWorktreeAsWorkspace { worktree_index: usize },
         RemoveWorkspace { index: usize },
@@ -4770,16 +4970,17 @@ mod property_test {
     }
 
     // Distribution (out of 20 slots):
-    //   SaveThread:              5 slots (25%)
-    //   SaveWorktreeThread:      2 slots (10%)
-    //   DeleteThread:            2 slots (10%)
-    //   ToggleAgentPanel:        2 slots (10%)
-    //   AddWorkspace:            1 slot  (5%)
-    //   OpenWorktreeAsWorkspace: 1 slot  (5%)
-    //   RemoveWorkspace:         1 slot  (5%)
-    //   SwitchWorkspace:         2 slots (10%)
-    //   AddLinkedWorktree:       4 slots (20%)
-    const DISTRIBUTION_SLOTS: u32 = 20;
+    //   SaveThread:              5 slots (~23%)
+    //   SaveWorktreeThread:      2 slots (~9%)
+    //   DeleteThread:            2 slots (~9%)
+    //   ToggleAgentPanel:        2 slots (~9%)
+    //   CreateDraftThread:       2 slots (~9%)
+    //   AddWorkspace:            1 slot  (~5%)
+    //   OpenWorktreeAsWorkspace: 1 slot  (~5%)
+    //   RemoveWorkspace:         1 slot  (~5%)
+    //   SwitchWorkspace:         2 slots (~9%)
+    //   AddLinkedWorktree:       4 slots (~18%)
+    const DISTRIBUTION_SLOTS: u32 = 22;
 
     impl TestState {
         fn generate_operation(&self, raw: u32) -> Operation {
@@ -4803,24 +5004,25 @@ mod property_test {
                     workspace_index: extra % workspace_count,
                 },
                 9..=10 => Operation::ToggleAgentPanel,
-                11 if !self.unopened_worktrees.is_empty() => Operation::OpenWorktreeAsWorkspace {
+                11..=12 => Operation::CreateDraftThread,
+                13 if !self.unopened_worktrees.is_empty() => Operation::OpenWorktreeAsWorkspace {
                     worktree_index: extra % self.unopened_worktrees.len(),
                 },
-                11 => Operation::AddWorkspace,
-                12 if workspace_count > 1 => Operation::RemoveWorkspace {
+                13 => Operation::AddWorkspace,
+                14 if workspace_count > 1 => Operation::RemoveWorkspace {
                     index: extra % workspace_count,
                 },
-                12 => Operation::AddWorkspace,
-                13..=14 => Operation::SwitchWorkspace {
+                14 => Operation::AddWorkspace,
+                15..=16 => Operation::SwitchWorkspace {
                     index: extra % workspace_count,
                 },
-                15..=19 if !self.main_repo_indices.is_empty() => {
+                17..=21 if !self.main_repo_indices.is_empty() => {
                     let main_index = self.main_repo_indices[extra % self.main_repo_indices.len()];
                     Operation::AddLinkedWorktree {
                         workspace_index: main_index,
                     }
                 }
-                15..=19 => Operation::SaveThread {
+                17..=21 => Operation::SaveThread {
                     workspace_index: extra % workspace_count,
                 },
                 _ => unreachable!(),
@@ -4838,25 +5040,14 @@ mod property_test {
         let updated_at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 1, 1, 0, 0, 0)
             .unwrap()
             + chrono::Duration::seconds(state.thread_counter as i64);
-        let metadata = ThreadMetadata {
-            session_id,
-            agent_id: agent::ZED_AGENT_ID.clone(),
-            title,
-            updated_at,
-            created_at: None,
-            folder_paths: path_list,
-            archived: false,
-        };
-        cx.update(|_, cx| {
-            ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
-        });
+        save_thread_metadata(session_id, title, updated_at, None, path_list, cx);
     }
 
     async fn perform_operation(
         operation: Operation,
         state: &mut TestState,
         multi_workspace: &Entity<MultiWorkspace>,
-        sidebar: &Entity<Sidebar>,
+        _sidebar: &Entity<Sidebar>,
         cx: &mut gpui::VisualTestContext,
     ) {
         match operation {
@@ -4882,13 +5073,26 @@ mod property_test {
             Operation::ToggleAgentPanel => {
                 let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
                 let panel_open =
-                    sidebar.read_with(cx, |sidebar, cx| sidebar.agent_panel_visible(cx));
+                    workspace.read_with(cx, |_, cx| AgentPanel::is_visible(&workspace, cx));
                 workspace.update_in(cx, |workspace, window, cx| {
                     if panel_open {
                         workspace.close_panel::<AgentPanel>(window, cx);
                     } else {
                         workspace.open_panel::<AgentPanel>(window, cx);
                     }
+                });
+            }
+            Operation::CreateDraftThread => {
+                let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+                let panel =
+                    workspace.read_with(cx, |workspace, cx| workspace.panel::<AgentPanel>(cx));
+                if let Some(panel) = panel {
+                    let connection = StubAgentConnection::new();
+                    open_thread_with_connection(&panel, connection, cx);
+                    cx.run_until_parked();
+                }
+                workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.focus_panel::<AgentPanel>(window, cx);
                 });
             }
             Operation::AddWorkspace => {
@@ -4913,7 +5117,7 @@ mod property_test {
                 let workspace = multi_workspace.update_in(cx, |mw, window, cx| {
                     mw.test_add_workspace(project.clone(), window, cx)
                 });
-                add_agent_panel(&workspace, &project, cx);
+                add_agent_panel(&workspace, cx);
                 let new_index = state.workspace_paths.len();
                 state.workspace_paths.push(path);
                 state.main_repo_indices.push(new_index);
@@ -4930,7 +5134,7 @@ mod property_test {
                 let workspace = multi_workspace.update_in(cx, |mw, window, cx| {
                     mw.test_add_workspace(project.clone(), window, cx)
                 });
-                add_agent_panel(&workspace, &project, cx);
+                add_agent_panel(&workspace, cx);
                 state.workspace_paths.push(worktree.path);
             }
             Operation::RemoveWorkspace { index } => {
@@ -4992,6 +5196,7 @@ mod property_test {
                             path: worktree_pathbuf,
                             ref_name: Some(format!("refs/heads/{}", worktree_name).into()),
                             sha: "aaa".into(),
+                            is_main: false,
                         });
                     })
                     .unwrap();
@@ -5130,34 +5335,59 @@ mod property_test {
             anyhow::bail!("sidebar should still have an associated multi-workspace");
         };
 
-        let workspace = multi_workspace.read(cx).workspace();
+        let active_workspace = multi_workspace.read(cx).workspace();
 
-        // TODO: The focused_thread should _always_ be Some(item-in-the-list) after
-        // update_entries. If the activated workspace's agent panel has an active thread,
-        // this item should match the one in the list. There may be a slight delay where
-        // a thread is loading so the agent panel returns None initially, and the
-        // focused_thread is often optimistically set to the thread the agent panel is
-        // going to be.
-        if sidebar.agent_panel_visible(cx) && !sidebar.active_thread_is_draft(cx) {
-            let panel_active_session_id =
-                workspace
-                    .read(cx)
-                    .panel::<AgentPanel>(cx)
-                    .and_then(|panel| {
-                        panel
-                            .read(cx)
-                            .active_conversation_view()
-                            .and_then(|cv| cv.read(cx).parent_id(cx))
-                    });
-            if let Some(panel_session_id) = panel_active_session_id {
-                anyhow::ensure!(
-                    sidebar.focused_thread.as_ref() == Some(&panel_session_id),
-                    "agent panel is visible with active session {:?} but sidebar focused_thread is {:?}",
-                    panel_session_id,
-                    sidebar.focused_thread,
-                );
-            }
+        // 1. active_entry must always be Some after rebuild_contents.
+        let entry = sidebar
+            .active_entry
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("active_entry must always be Some"))?;
+
+        // 2. The entry's workspace must agree with the multi-workspace's
+        //    active workspace.
+        anyhow::ensure!(
+            entry.workspace().entity_id() == active_workspace.entity_id(),
+            "active_entry workspace ({:?}) != active workspace ({:?})",
+            entry.workspace().entity_id(),
+            active_workspace.entity_id(),
+        );
+
+        // 3. The entry must match the agent panel's current state.
+        let panel = active_workspace.read(cx).panel::<AgentPanel>(cx).unwrap();
+        if panel.read(cx).active_thread_is_draft(cx) {
+            anyhow::ensure!(
+                matches!(entry, ActiveEntry::Draft(_)),
+                "panel shows a draft but active_entry is {:?}",
+                entry,
+            );
+        } else if let Some(session_id) = panel
+            .read(cx)
+            .active_conversation_view()
+            .and_then(|cv| cv.read(cx).parent_id(cx))
+        {
+            anyhow::ensure!(
+                matches!(entry, ActiveEntry::Thread { session_id: id, .. } if id == &session_id),
+                "panel has session {:?} but active_entry is {:?}",
+                session_id,
+                entry,
+            );
         }
+
+        // 4. Exactly one entry in sidebar contents must be uniquely
+        //    identified by the active_entry.
+        let matching_count = sidebar
+            .contents
+            .entries
+            .iter()
+            .filter(|e| entry.matches_entry(e))
+            .count();
+        anyhow::ensure!(
+            matching_count == 1,
+            "expected exactly 1 sidebar entry matching active_entry {:?}, found {}",
+            entry,
+            matching_count,
+        );
+
         Ok(())
     }
 
@@ -5193,7 +5423,7 @@ mod property_test {
 
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, &project, cx);
+        let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
         let mut state = TestState::new(fs, "/my-project".to_string());
         let mut executed: Vec<String> = Vec::new();
