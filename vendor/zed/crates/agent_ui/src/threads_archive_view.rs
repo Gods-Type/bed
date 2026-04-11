@@ -340,7 +340,7 @@ impl ThreadsArchiveView {
             return;
         }
 
-        if thread.folder_paths.is_empty() {
+        if thread.folder_paths().is_empty() {
             self.show_project_picker_for_thread(thread, window, cx);
             return;
         }
@@ -537,7 +537,7 @@ impl ThreadsArchiveView {
                     })
                     .timestamp(timestamp)
                     .highlight_positions(highlight_positions.clone())
-                    .project_paths(thread.folder_paths.paths_owned())
+                    .project_paths(thread.folder_paths().paths_owned())
                     .focused(is_focused)
                     .hovered(is_hovered)
                     .on_hover(cx.listener(move |this, is_hovered, _window, cx| {
@@ -553,7 +553,6 @@ impl ThreadsArchiveView {
                     base.status(AgentThreadStatus::Running)
                         .action_slot(
                             IconButton::new("cancel-restore", IconName::Close)
-                                .style(ButtonStyle::Filled)
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Muted)
                                 .tooltip(Tooltip::text("Cancel Restore"))
@@ -568,12 +567,11 @@ impl ThreadsArchiveView {
                                     })
                                 }),
                         )
-                        .tooltip(Tooltip::text("Restoring\u{2026}"))
+                        .tooltip(Tooltip::text("Restoring…"))
                         .into_any_element()
                 } else {
                     base.action_slot(
                         IconButton::new("delete-thread", IconName::Trash)
-                            .style(ButtonStyle::Filled)
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
                             .tooltip({
@@ -930,7 +928,8 @@ impl ProjectPickerDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) {
-        self.thread.folder_paths = paths.clone();
+        self.thread.worktree_paths =
+            super::thread_metadata_store::ThreadWorktreePaths::from_folder_paths(&paths);
         ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.update_working_directories(&self.thread.session_id, paths, cx);
         });
