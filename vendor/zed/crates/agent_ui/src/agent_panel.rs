@@ -1287,12 +1287,11 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.external_thread(
-            Some(crate::Agent::NativeAgent),
-            Some(session_id),
+        self.load_agent_thread(
+            crate::Agent::NativeAgent,
+            session_id,
             work_dirs,
             title,
-            None,
             true,
             window,
             cx,
@@ -2153,63 +2152,8 @@ impl AgentPanel {
             return;
         }
 
-        let is_empty_draft = match conversation_view.read(cx).root_thread(cx) {
-            Some(tv) => tv.read(cx).is_draft(cx),
-            None => conversation_view.read(cx).is_new_draft(),
-        };
-        if is_empty_draft {
-            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-                store.delete(thread_id, cx);
-            });
-            return;
-        }
-
         self.retained_threads.insert(thread_id, conversation_view);
         self.cleanup_retained_threads(cx);
-    }
-
-    fn remove_empty_draft(&mut self, cx: &mut Context<Self>) {
-        let draft_ids: Vec<ThreadId> = self
-            .retained_threads
-            .iter()
-            .filter(|(_, cv)| match cv.read(cx).root_thread(cx) {
-                Some(tv) => tv.read(cx).is_draft(cx),
-                None => cv.read(cx).is_new_draft(),
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in draft_ids {
-            self.retained_threads.remove(&id);
-            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-                store.delete(id, cx);
-            });
-        }
-
-        // Also clean up orphaned draft metadata in the store for this
-        // panel's worktree paths (e.g. from a previously removed workspace).
-        let path_list = {
-            let project = self.project.read(cx);
-            let worktree_paths = project.worktree_paths(cx);
-            worktree_paths.main_worktree_path_list().clone()
-        };
-        if let Some(store) = ThreadMetadataStore::try_global(cx) {
-            let orphaned: Vec<ThreadId> = {
-                let store = store.read(cx);
-                store
-                    .entries_for_path(&path_list)
-                    .chain(store.entries_for_main_worktree_path(&path_list))
-                    .filter(|entry| entry.is_draft())
-                    .map(|entry| entry.thread_id)
-                    .collect()
-            };
-            if !orphaned.is_empty() {
-                store.update(cx, |store, cx| {
-                    for id in orphaned {
-                        store.delete(id, cx);
-                    }
-                });
-            }
-        }
     }
 
     fn cleanup_retained_threads(&mut self, cx: &App) {
@@ -2808,7 +2752,6 @@ impl AgentPanel {
                     window,
                     cx,
                 );
-                self.remove_empty_draft(cx);
                 return;
             }
         }
@@ -2823,7 +2766,6 @@ impl AgentPanel {
             window,
             cx,
         );
-        self.remove_empty_draft(cx);
     }
 
     pub(crate) fn create_agent_thread(
@@ -3645,6 +3587,7 @@ impl AgentPanel {
                             cx,
                         )
                     },
+                    &[],
                     window,
                     cx,
                 );
@@ -5234,16 +5177,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let active_id = self.active_thread_id(cx);
-        let empty_draft_ids: Vec<ThreadId> = self
-            .draft_thread_ids(cx)
-            .into_iter()
-            .filter(|id| Some(*id) != active_id && self.editor_text(*id, cx).is_none())
-            .collect();
-        for id in empty_draft_ids {
-            self.remove_thread(id, cx);
-        }
-
         let ext_agent = Agent::Custom {
             id: server.agent_id(),
         };
@@ -5340,17 +5273,168 @@ mod tests {
         active_session_id, active_thread_id, open_thread_with_connection,
         open_thread_with_custom_connection, send_message,
     };
-    use acp_thread::{StubAgentConnection, ThreadStatus};
+    use acp_thread::{AgentConnection, StubAgentConnection, ThreadStatus, UserMessageId};
+    use action_log::ActionLog;
     use agent_servers::CODEX_ID;
+    use anyhow::Result;
     use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{App, TestAppContext, VisualTestContext};
+    use parking_lot::Mutex;
     use project::Project;
+    use std::any::Any;
 
     use serde_json::json;
     use std::path::Path;
+    use std::sync::Arc;
     use std::time::Instant;
     use workspace::MultiWorkspace;
+
+    #[derive(Clone, Default)]
+    struct SessionTrackingConnection {
+        next_session_number: Arc<Mutex<usize>>,
+        sessions: Arc<Mutex<HashSet<acp::SessionId>>>,
+    }
+
+    impl SessionTrackingConnection {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn create_session(
+            self: Rc<Self>,
+            session_id: acp::SessionId,
+            project: Entity<Project>,
+            work_dirs: PathList,
+            title: Option<SharedString>,
+            cx: &mut App,
+        ) -> Entity<AcpThread> {
+            self.sessions.lock().insert(session_id.clone());
+
+            let action_log = cx.new(|_| ActionLog::new(project.clone()));
+            cx.new(|cx| {
+                AcpThread::new(
+                    None,
+                    title,
+                    Some(work_dirs),
+                    self,
+                    project,
+                    action_log,
+                    session_id,
+                    watch::Receiver::constant(
+                        acp::PromptCapabilities::new()
+                            .image(true)
+                            .audio(true)
+                            .embedded_context(true),
+                    ),
+                    cx,
+                )
+            })
+        }
+    }
+
+    impl AgentConnection for SessionTrackingConnection {
+        fn agent_id(&self) -> AgentId {
+            agent::ZED_AGENT_ID.clone()
+        }
+
+        fn telemetry_id(&self) -> SharedString {
+            "session-tracking-test".into()
+        }
+
+        fn new_session(
+            self: Rc<Self>,
+            project: Entity<Project>,
+            work_dirs: PathList,
+            cx: &mut App,
+        ) -> Task<Result<Entity<AcpThread>>> {
+            let session_id = {
+                let mut next_session_number = self.next_session_number.lock();
+                let session_id = acp::SessionId::new(format!(
+                    "session-tracking-session-{}",
+                    *next_session_number
+                ));
+                *next_session_number += 1;
+                session_id
+            };
+            let thread = self.create_session(session_id, project, work_dirs, None, cx);
+            Task::ready(Ok(thread))
+        }
+
+        fn supports_load_session(&self) -> bool {
+            true
+        }
+
+        fn load_session(
+            self: Rc<Self>,
+            session_id: acp::SessionId,
+            project: Entity<Project>,
+            work_dirs: PathList,
+            title: Option<SharedString>,
+            cx: &mut App,
+        ) -> Task<Result<Entity<AcpThread>>> {
+            let thread = self.create_session(session_id, project, work_dirs, title, cx);
+            thread.update(cx, |thread, cx| {
+                thread
+                    .handle_session_update(
+                        acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
+                            "Restored user message".into(),
+                        )),
+                        cx,
+                    )
+                    .expect("restored user message should be applied");
+                thread
+                    .handle_session_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            "Restored assistant message".into(),
+                        )),
+                        cx,
+                    )
+                    .expect("restored assistant message should be applied");
+            });
+            Task::ready(Ok(thread))
+        }
+
+        fn supports_close_session(&self) -> bool {
+            true
+        }
+
+        fn close_session(
+            self: Rc<Self>,
+            session_id: &acp::SessionId,
+            _cx: &mut App,
+        ) -> Task<Result<()>> {
+            self.sessions.lock().remove(session_id);
+            Task::ready(Ok(()))
+        }
+
+        fn auth_methods(&self) -> &[acp::AuthMethod] {
+            &[]
+        }
+
+        fn authenticate(&self, _method_id: acp::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+
+        fn prompt(
+            &self,
+            _id: UserMessageId,
+            params: acp::PromptRequest,
+            _cx: &mut App,
+        ) -> Task<Result<acp::PromptResponse>> {
+            if !self.sessions.lock().contains(&params.session_id) {
+                return Task::ready(Err(anyhow!("Session not found")));
+            }
+
+            Task::ready(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
+        }
+
+        fn cancel(&self, _session_id: &acp::SessionId, _cx: &mut App) {}
+
+        fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
+            self
+        }
+    }
 
     #[gpui::test]
     async fn test_active_thread_serialize_and_load_round_trip(cx: &mut TestAppContext) {
@@ -5883,33 +5967,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_empty_draft_discarded_when_navigating_away(cx: &mut TestAppContext) {
-        let (panel, mut cx) = setup_panel(cx).await;
-
-        let connection_a = StubAgentConnection::new();
-        open_thread_with_connection(&panel, connection_a, &mut cx);
-
-        panel.read_with(&cx, |panel, cx| {
-            let thread = panel.active_agent_thread(cx).unwrap();
-            assert!(
-                thread.read(cx).entries().is_empty(),
-                "newly opened draft thread should have no entries"
-            );
-            assert!(panel.retained_threads.is_empty());
-        });
-
-        let connection_b = StubAgentConnection::new();
-        open_thread_with_connection(&panel, connection_b, &mut cx);
-
-        panel.read_with(&cx, |panel, _cx| {
-            assert!(
-                panel.retained_threads.is_empty(),
-                "empty draft should be discarded, not retained"
-            );
-        });
-    }
-
-    #[gpui::test]
     async fn test_running_thread_retained_when_navigating_away(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
 
@@ -6059,6 +6116,61 @@ mod tests {
             assert!(
                 panel.retained_threads.contains_key(&thread_id_b),
                 "Thread B (idle, non-loadable) should remain retained in retained_threads"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_reopening_visible_thread_keeps_thread_usable(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    Agent::NativeAgent,
+                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.external_thread(
+                Some(Agent::NativeAgent),
+                None,
+                None,
+                None,
+                None,
+                true,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        send_message(&panel, &mut cx);
+
+        let session_id = active_session_id(&panel, &cx);
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_thread(session_id.clone(), None, None, window, cx);
+        });
+        cx.run_until_parked();
+
+        send_message(&panel, &mut cx);
+
+        panel.read_with(&cx, |panel, cx| {
+            let active_view = panel
+                .active_conversation_view()
+                .expect("visible conversation should remain open after reopening");
+            let connected = active_view
+                .read(cx)
+                .as_connected()
+                .expect("visible conversation should still be connected in the UI");
+            assert!(
+                !connected.has_thread_error(cx),
+                "reopening an already-visible session should keep the thread usable"
             );
         });
     }
