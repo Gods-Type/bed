@@ -21,11 +21,11 @@ use db::{
 use fs::Fs;
 use futures::{FutureExt, future::Shared};
 use gpui::{AppContext as _, Entity, Global, Subscription, Task};
-use project::AgentId;
 pub use project::WorktreePaths;
+use project::{AgentId, linked_worktree_short_name};
 use remote::{RemoteConnectionOptions, same_remote_connection_identity};
-use ui::{App, Context, SharedString};
-use util::ResultExt as _;
+use ui::{App, Context, SharedString, ThreadItemWorktreeInfo, WorktreeKind};
+use util::{ResultExt as _, debug_panic};
 use workspace::{PathList, SerializedWorkspaceLocation, WorkspaceDb};
 
 use crate::DEFAULT_THREAD_TITLE;
@@ -54,6 +54,31 @@ impl Column for ThreadId {
 
 const THREAD_REMOTE_CONNECTION_MIGRATION_KEY: &str = "thread-metadata-remote-connection-backfill";
 const THREAD_ID_MIGRATION_KEY: &str = "thread-metadata-thread-id-backfill";
+
+/// List all sidebar thread metadata from an arbitrary SQLite connection.
+///
+/// This is used to read thread metadata from another release channel's
+/// database without opening a full `ThreadSafeConnection`.
+pub(crate) fn list_thread_metadata_from_connection(
+    connection: &db::sqlez::connection::Connection,
+) -> anyhow::Result<Vec<ThreadMetadata>> {
+    connection.select::<ThreadMetadata>(ThreadMetadataDb::LIST_QUERY)?()
+}
+
+/// Run the `ThreadMetadataDb` migrations on a raw connection.
+///
+/// This is used in tests to set up the sidebar_threads schema in a
+/// temporary database.
+#[cfg(test)]
+pub(crate) fn run_thread_metadata_migrations(connection: &db::sqlez::connection::Connection) {
+    connection
+        .migrate(
+            ThreadMetadataDb::NAME,
+            ThreadMetadataDb::MIGRATIONS,
+            &mut |_, _, _| false,
+        )
+        .expect("thread metadata migrations should succeed");
+}
 
 pub fn init(cx: &mut App) {
     ThreadMetadataStore::init_global(cx);
@@ -275,31 +300,6 @@ pub struct ThreadMetadata {
 }
 
 impl ThreadMetadata {
-    pub fn new_draft(
-        thread_id: ThreadId,
-        agent_id: AgentId,
-        title: Option<SharedString>,
-        worktree_paths: WorktreePaths,
-        remote_connection: Option<RemoteConnectionOptions>,
-    ) -> Self {
-        let now = Utc::now();
-        Self {
-            thread_id,
-            session_id: None,
-            agent_id,
-            title,
-            updated_at: now,
-            created_at: Some(now),
-            worktree_paths: worktree_paths.clone(),
-            remote_connection,
-            archived: worktree_paths.is_empty(),
-        }
-    }
-
-    pub fn is_draft(&self) -> bool {
-        self.session_id.is_none()
-    }
-
     pub fn display_title(&self) -> SharedString {
         self.title
             .clone()
@@ -312,6 +312,73 @@ impl ThreadMetadata {
     pub fn main_worktree_paths(&self) -> &PathList {
         self.worktree_paths.main_worktree_path_list()
     }
+}
+
+/// Derives worktree display info from a thread's stored path list.
+///
+/// For each path in the thread's `folder_paths`, produces a
+/// [`ThreadItemWorktreeInfo`] with a short display name, full path, and whether
+/// the worktree is the main checkout or a linked git worktree. When
+/// multiple main paths exist and a linked worktree's short name alone
+/// wouldn't identify which main project it belongs to, the main project
+/// name is prefixed for disambiguation (e.g. `project:feature`).
+pub fn worktree_info_from_thread_paths<S: std::hash::BuildHasher>(
+    worktree_paths: &WorktreePaths,
+    branch_names: &std::collections::HashMap<PathBuf, SharedString, S>,
+) -> Vec<ThreadItemWorktreeInfo> {
+    let mut infos: Vec<ThreadItemWorktreeInfo> = Vec::new();
+    let mut linked_short_names: Vec<(SharedString, SharedString)> = Vec::new();
+    let mut unique_main_count = HashSet::default();
+
+    for (main_path, folder_path) in worktree_paths.ordered_pairs() {
+        unique_main_count.insert(main_path.clone());
+        let is_linked = main_path != folder_path;
+
+        if is_linked {
+            let short_name = linked_worktree_short_name(main_path, folder_path).unwrap_or_default();
+            let project_name = main_path
+                .file_name()
+                .map(|n| SharedString::from(n.to_string_lossy().to_string()))
+                .unwrap_or_default();
+            linked_short_names.push((short_name.clone(), project_name));
+            infos.push(ThreadItemWorktreeInfo {
+                name: short_name,
+                full_path: SharedString::from(folder_path.display().to_string()),
+                highlight_positions: Vec::new(),
+                kind: WorktreeKind::Linked,
+                branch_name: branch_names.get(folder_path).cloned(),
+            });
+        } else {
+            let Some(name) = folder_path.file_name() else {
+                continue;
+            };
+            infos.push(ThreadItemWorktreeInfo {
+                name: SharedString::from(name.to_string_lossy().to_string()),
+                full_path: SharedString::from(folder_path.display().to_string()),
+                highlight_positions: Vec::new(),
+                kind: WorktreeKind::Main,
+                branch_name: branch_names.get(folder_path).cloned(),
+            });
+        }
+    }
+
+    // When the group has multiple main worktree paths and the thread's
+    // folder paths don't all share the same short name, prefix each
+    // linked worktree chip with its main project name so the user knows
+    // which project it belongs to.
+    let all_same_name = infos.len() > 1 && infos.iter().all(|i| i.name == infos[0].name);
+
+    if unique_main_count.len() > 1 && !all_same_name {
+        for (info, (_short_name, project_name)) in infos
+            .iter_mut()
+            .filter(|i| i.kind == WorktreeKind::Linked)
+            .zip(linked_short_names.iter())
+        {
+            info.name = SharedString::from(format!("{}:{}", project_name, info.name));
+        }
+    }
+
+    infos
 }
 
 impl From<&ThreadMetadata> for acp_thread::AgentSessionInfo {
@@ -551,20 +618,7 @@ impl ThreadMetadataStore {
                     this.threads_by_session.clear();
 
                     for row in rows {
-                        if let Some(sid) = &row.session_id {
-                            this.threads_by_session.insert(sid.clone(), row.thread_id);
-                        }
-                        this.threads_by_paths
-                            .entry(row.folder_paths().clone())
-                            .or_default()
-                            .insert(row.thread_id);
-                        if !row.main_worktree_paths().is_empty() {
-                            this.threads_by_main_paths
-                                .entry(row.main_worktree_paths().clone())
-                                .or_default()
-                                .insert(row.thread_id);
-                        }
-                        this.threads.insert(row.thread_id, row);
+                        this.cache_thread_metadata(row);
                     }
 
                     cx.notify();
@@ -589,6 +643,11 @@ impl ThreadMetadataStore {
     }
 
     fn save_internal(&mut self, metadata: ThreadMetadata) {
+        if metadata.session_id.is_none() {
+            debug_panic!("cannot store thread metadata without a session_id");
+            return;
+        };
+
         if let Some(thread) = self.threads.get(&metadata.thread_id) {
             if thread.folder_paths() != metadata.folder_paths() {
                 if let Some(thread_ids) = self.threads_by_paths.get_mut(thread.folder_paths()) {
@@ -607,10 +666,20 @@ impl ThreadMetadataStore {
             }
         }
 
-        if let Some(sid) = &metadata.session_id {
-            self.threads_by_session
-                .insert(sid.clone(), metadata.thread_id);
-        }
+        self.cache_thread_metadata(metadata.clone());
+        self.pending_thread_ops_tx
+            .try_send(DbOperation::Upsert(metadata))
+            .log_err();
+    }
+
+    fn cache_thread_metadata(&mut self, metadata: ThreadMetadata) {
+        let Some(session_id) = metadata.session_id.as_ref() else {
+            debug_panic!("cannot store thread metadata without a session_id");
+            return;
+        };
+
+        self.threads_by_session
+            .insert(session_id.clone(), metadata.thread_id);
 
         self.threads.insert(metadata.thread_id, metadata.clone());
 
@@ -625,10 +694,6 @@ impl ThreadMetadataStore {
                 .or_default()
                 .insert(metadata.thread_id);
         }
-
-        self.pending_thread_ops_tx
-            .try_send(DbOperation::Upsert(metadata))
-            .log_err();
     }
 
     pub fn update_working_directories(
@@ -807,44 +872,13 @@ impl ThreadMetadataStore {
             .into_iter()
             .flatten()
             .filter(|id| {
-                same_remote_connection_identity(
-                    self.threads
-                        .get(id)
-                        .and_then(|t| t.remote_connection.as_ref()),
-                    remote_connection,
-                )
-            })
-            .copied()
-            .collect();
-
-        self.mutate_thread_paths(&thread_ids, mutate, cx);
-    }
-
-    /// Like `change_worktree_paths`, but looks up threads by their
-    /// `main_worktree_paths` instead of `folder_paths`. Used when
-    /// migrating threads for project group key changes where the
-    /// lookup key is the group key's main paths.
-    /// When `remote_connection` is provided, only threads with a matching
-    /// remote connection are affected.
-    pub fn change_worktree_paths_by_main(
-        &mut self,
-        current_main_paths: &PathList,
-        remote_connection: Option<&RemoteConnectionOptions>,
-        mutate: impl Fn(&mut WorktreePaths),
-        cx: &mut Context<Self>,
-    ) {
-        let thread_ids: Vec<_> = self
-            .threads_by_main_paths
-            .get(current_main_paths)
-            .into_iter()
-            .flatten()
-            .filter(|id| {
-                same_remote_connection_identity(
-                    self.threads
-                        .get(id)
-                        .and_then(|t| t.remote_connection.as_ref()),
-                    remote_connection,
-                )
+                self.threads.get(id).is_some_and(|t| {
+                    !t.archived
+                        && same_remote_connection_identity(
+                            t.remote_connection.as_ref(),
+                            remote_connection,
+                        )
+                })
             })
             .copied()
             .collect();
@@ -967,6 +1001,14 @@ impl ThreadMetadataStore {
             db.is_archived_worktree_referenced(archived_worktree_id)
                 .await
         })
+    }
+
+    pub fn get_all_archived_branch_names(
+        &self,
+        cx: &App,
+    ) -> Task<anyhow::Result<HashMap<ThreadId, HashMap<PathBuf, String>>>> {
+        let db = self.db.clone();
+        cx.background_spawn(async move { db.get_all_archived_branch_names() })
     }
 
     fn update_archived(&mut self, thread_id: ThreadId, archived: bool, cx: &mut Context<Self>) {
@@ -1096,7 +1138,7 @@ impl ThreadMetadataStore {
         };
 
         let thread_ref = thread.read(cx);
-        if thread_ref.entries().is_empty() {
+        if thread_ref.is_draft_thread() {
             return;
         }
 
@@ -1125,10 +1167,10 @@ impl ThreadMetadataStore {
                 )
             } else {
                 let project = thread_ref.project().read(cx);
-                (
-                    project.worktree_paths(cx),
-                    project.remote_connection_options(cx),
-                )
+                let worktree_paths = project.worktree_paths(cx);
+                let remote_connection = project.remote_connection_options(cx);
+
+                (worktree_paths, remote_connection)
             };
 
         // Threads without a folder path (e.g. started in an empty
@@ -1235,6 +1277,19 @@ impl Domain for ThreadMetadataDb {
             DROP TABLE sidebar_threads;
             ALTER TABLE sidebar_threads_v2 RENAME TO sidebar_threads;
         ),
+        sql!(
+            DELETE FROM thread_archived_worktrees
+            WHERE thread_id IN (
+                SELECT thread_id FROM sidebar_threads WHERE session_id IS NULL
+            );
+
+            DELETE FROM sidebar_threads WHERE session_id IS NULL;
+
+            DELETE FROM archived_git_worktrees
+            WHERE id NOT IN (
+                SELECT archived_worktree_id FROM thread_archived_worktrees
+            );
+        ),
     ];
 }
 
@@ -1245,21 +1300,32 @@ impl ThreadMetadataDb {
     pub fn list_ids(&self) -> anyhow::Result<Vec<ThreadId>> {
         self.select::<ThreadId>(
             "SELECT thread_id FROM sidebar_threads \
+             WHERE session_id IS NOT NULL \
              ORDER BY updated_at DESC",
         )?()
     }
 
+    const LIST_QUERY: &str = "SELECT thread_id, session_id, agent_id, title, updated_at, \
+        created_at, folder_paths, folder_paths_order, archived, main_worktree_paths, \
+        main_worktree_paths_order, remote_connection \
+        FROM sidebar_threads \
+        WHERE session_id IS NOT NULL \
+        ORDER BY updated_at DESC";
+
     /// List all sidebar thread metadata, ordered by updated_at descending.
+    ///
+    /// Only returns threads that have a `session_id`.
     pub fn list(&self) -> anyhow::Result<Vec<ThreadMetadata>> {
-        self.select::<ThreadMetadata>(
-            "SELECT thread_id, session_id, agent_id, title, updated_at, created_at, folder_paths, folder_paths_order, archived, main_worktree_paths, main_worktree_paths_order, remote_connection \
-             FROM sidebar_threads \
-             ORDER BY updated_at DESC"
-        )?()
+        self.select::<ThreadMetadata>(Self::LIST_QUERY)?()
     }
 
     /// Upsert metadata for a thread.
     pub async fn save(&self, row: ThreadMetadata) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            row.session_id.is_some(),
+            "refusing to persist thread metadata without a session_id"
+        );
+
         let session_id = row.session_id.as_ref().map(|s| s.0.clone());
         let agent_id = if row.agent_id.as_ref() == ZED_AGENT_ID.as_ref() {
             None
@@ -1436,6 +1502,27 @@ impl ThreadMetadataDb {
             "SELECT COUNT(*) FROM thread_archived_worktrees WHERE archived_worktree_id = ?1",
         )?(archived_worktree_id)
         .map(|count| count.unwrap_or(0) > 0)
+    }
+
+    pub fn get_all_archived_branch_names(
+        &self,
+    ) -> anyhow::Result<HashMap<ThreadId, HashMap<PathBuf, String>>> {
+        let rows = self.select::<(ThreadId, String, String)>(
+            "SELECT t.thread_id, a.worktree_path, a.branch_name \
+             FROM thread_archived_worktrees t \
+             JOIN archived_git_worktrees a ON a.id = t.archived_worktree_id \
+             WHERE a.branch_name IS NOT NULL \
+             ORDER BY a.id ASC",
+        )?()?;
+
+        let mut result: HashMap<ThreadId, HashMap<PathBuf, String>> = HashMap::default();
+        for (thread_id, worktree_path, branch_name) in rows {
+            result
+                .entry(thread_id)
+                .or_default()
+                .insert(PathBuf::from(worktree_path), branch_name);
+        }
+        Ok(result)
     }
 }
 
@@ -1643,7 +1730,7 @@ mod tests {
             .unwrap();
     }
 
-    fn run_thread_metadata_migrations(cx: &mut TestAppContext) {
+    fn run_store_migrations(cx: &mut TestAppContext) {
         clear_thread_metadata_remote_connection_backfill(cx);
         cx.update(|cx| {
             let migration_task = migrate_thread_metadata(cx);
@@ -1922,7 +2009,7 @@ mod tests {
             cx.run_until_parked();
         }
 
-        run_thread_metadata_migrations(cx);
+        run_store_migrations(cx);
 
         let list = cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
@@ -2013,7 +2100,7 @@ mod tests {
         save_task.await.unwrap();
         cx.run_until_parked();
 
-        run_thread_metadata_migrations(cx);
+        run_store_migrations(cx);
 
         let list = cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
@@ -2151,7 +2238,7 @@ mod tests {
             cx.run_until_parked();
         }
 
-        run_thread_metadata_migrations(cx);
+        run_store_migrations(cx);
 
         let list = cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
@@ -2207,18 +2294,14 @@ mod tests {
         let session_id = thread.read_with(&vcx, |t, _| t.session_id().clone());
         let thread_id = crate::test_support::active_thread_id(&panel, &vcx);
 
-        // Initial metadata was created by the panel with session_id: None.
+        // Draft threads no longer create metadata entries.
         cx.read(|cx| {
             let store = ThreadMetadataStore::global(cx).read(cx);
-            assert_eq!(store.entry_ids().count(), 1);
-            assert!(
-                store.entry(thread_id).unwrap().session_id.is_none(),
-                "expected initial panel metadata to have no session_id"
-            );
+            assert_eq!(store.entry_ids().count(), 0);
         });
 
         // Setting a title on an empty thread should be ignored by the
-        // event handler (entries are empty), leaving session_id as None.
+        // event handler (entries are empty), so no metadata is created.
         thread.update_in(&mut vcx, |thread, _window, cx| {
             thread.set_title("Draft Thread".into(), cx).detach();
         });
@@ -2226,9 +2309,10 @@ mod tests {
 
         cx.read(|cx| {
             let store = ThreadMetadataStore::global(cx).read(cx);
-            assert!(
-                store.entry(thread_id).unwrap().session_id.is_none(),
-                "expected title updates on empty thread to be ignored by event handler"
+            assert_eq!(
+                store.entry_ids().count(),
+                0,
+                "expected title updates on empty thread to not create metadata"
             );
         });
 
@@ -3333,14 +3417,9 @@ mod tests {
             .unwrap()()
         .unwrap();
 
-        // Run all migrations (0-7). sqlez skips 0-6 and runs only migration 7.
-        connection
-            .migrate(
-                ThreadMetadataDb::NAME,
-                ThreadMetadataDb::MIGRATIONS,
-                &mut |_, _, _| false,
-            )
-            .expect("new migration should succeed");
+        // Run all current migrations. sqlez skips the already-applied ones and
+        // runs the remaining migrations.
+        run_thread_metadata_migrations(&connection);
 
         // All 3 rows should survive with non-NULL thread_ids.
         let count: i64 = connection

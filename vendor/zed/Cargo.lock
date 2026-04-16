@@ -1251,6 +1251,7 @@ dependencies = [
  "fs",
  "gpui",
  "markdown_preview",
+ "notifications",
  "release_channel",
  "semver",
  "serde",
@@ -15896,6 +15897,7 @@ dependencies = [
  "edit_prediction",
  "edit_prediction_ui",
  "editor",
+ "feature_flags",
  "fs",
  "futures 0.3.32",
  "fuzzy",
@@ -16063,6 +16065,7 @@ dependencies = [
  "serde_json",
  "settings",
  "smol",
+ "telemetry",
  "theme",
  "theme_settings",
  "ui",
@@ -22130,7 +22133,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.233.0"
+version = "0.234.0"
 dependencies = [
  "acp_thread",
  "acp_tools",
