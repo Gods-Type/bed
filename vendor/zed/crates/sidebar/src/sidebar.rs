@@ -68,8 +68,8 @@ gpui::actions!(
     [
         /// Creates a new thread in the currently selected or active project group.
         NewThreadInGroup,
-        /// Toggles between the thread list and the archive view.
-        ViewAllThreads,
+        /// Toggles between the thread list and the thread history.
+        ToggleThreadHistory,
     ]
 );
 
@@ -89,7 +89,8 @@ const MAX_WIDTH: Pixels = px(800.0);
 enum SerializedSidebarView {
     #[default]
     ThreadList,
-    Archive,
+    #[serde(alias = "Archive")]
+    History,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -510,6 +511,9 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         let project = workspace.read(cx).project().clone();
+        if project.read(cx).is_via_collab() {
+            return;
+        }
 
         cx.subscribe_in(
             &project,
@@ -576,6 +580,10 @@ impl Sidebar {
         old_paths: &WorktreePaths,
         cx: &mut Context<Self>,
     ) {
+        if project.read(cx).is_via_collab() {
+            return;
+        }
+
         let new_paths = project.read(cx).worktree_paths(cx);
         let old_folder_paths = old_paths.folder_path_list().clone();
 
@@ -1572,13 +1580,7 @@ impl Sidebar {
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     if event.modifiers().secondary() {
-                        if let Some(workspace) = this.workspace_for_group(&key_for_focus, cx) {
-                            this.activate_workspace(&workspace, window, cx);
-                        } else {
-                            this.open_workspace_for_group(&key_for_focus, window, cx);
-                        }
-                        this.selection = None;
-                        this.active_entry = None;
+                        this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
                     } else {
                         this.toggle_collapse(&key_for_toggle, window, cx);
                     }
@@ -1751,25 +1753,19 @@ impl Sidebar {
                             )
                             .selectable(!is_active);
 
-                        menu.when(show_multi_project_entries, |menu| {
-                            let project_group_key = project_group_key.clone();
-                            let multi_workspace = multi_workspace.clone();
-                            menu.separator()
-                                .entry("Remove Project", None, move |window, cx| {
-                                    multi_workspace
-                                        .update(cx, |multi_workspace, cx| {
-                                            multi_workspace
-                                                .remove_project_group(
-                                                    &project_group_key,
-                                                    window,
-                                                    cx,
-                                                )
-                                                .detach_and_log_err(cx);
-                                        })
-                                        .ok();
-                                    weak_menu.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
-                                })
-                        })
+                        let project_group_key = project_group_key.clone();
+                        let multi_workspace = multi_workspace.clone();
+                        menu.separator()
+                            .entry("Remove Project", None, move |window, cx| {
+                                multi_workspace
+                                    .update(cx, |multi_workspace, cx| {
+                                        multi_workspace
+                                            .remove_project_group(&project_group_key, window, cx)
+                                            .detach_and_log_err(cx);
+                                    })
+                                    .ok();
+                                weak_menu.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+                            })
                     });
 
                 let this = this.clone();
@@ -2161,7 +2157,6 @@ impl Sidebar {
         let mut existing_panel = None;
         workspace.update(cx, |workspace, cx| {
             if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                panel.update(cx, |panel, _cx| panel.begin_loading_thread());
                 existing_panel = Some(panel);
             }
         });
@@ -2189,7 +2184,6 @@ impl Sidebar {
                     workspace.add_panel(panel.clone(), window, cx);
                     panel.clone()
                 });
-                panel.update(cx, |panel, _cx| panel.begin_loading_thread());
                 load_thread(panel, &metadata, focus, window, cx);
                 if focus {
                     workspace.focus_panel::<AgentPanel>(window, cx);
@@ -2524,10 +2518,18 @@ impl Sidebar {
 
                 let mut path_replacements: Vec<(PathBuf, PathBuf)> = Vec::new();
                 for row in &archived_worktrees {
-                    match thread_worktree_archive::restore_worktree_via_git(row, &mut *cx).await {
+                    match thread_worktree_archive::restore_worktree_via_git(
+                        row,
+                        metadata.remote_connection.as_ref(),
+                        &mut *cx,
+                    )
+                    .await
+                    {
                         Ok(restored_path) => {
                             thread_worktree_archive::cleanup_archived_worktree_record(
-                                row, &mut *cx,
+                                row,
+                                metadata.remote_connection.as_ref(),
+                                &mut *cx,
                             )
                             .await;
                             path_replacements.push((row.worktree_path.clone(), restored_path));
@@ -2804,7 +2806,12 @@ impl Sidebar {
                     .folder_paths()
                     .ordered_paths()
                     .filter_map(|path| {
-                        thread_worktree_archive::build_root_plan(path, &workspaces, cx)
+                        thread_worktree_archive::build_root_plan(
+                            path,
+                            metadata.remote_connection.as_ref(),
+                            &workspaces,
+                            cx,
+                        )
                     })
                     .filter(|plan| {
                         thread_id.map_or(true, |tid| {
@@ -3869,6 +3876,26 @@ impl Sidebar {
         }
     }
 
+    pub(crate) fn activate_or_open_workspace_for_group(
+        &mut self,
+        key: &ProjectGroupKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self
+            .multi_workspace
+            .upgrade()
+            .and_then(|mw| mw.read(cx).last_active_workspace_for_group(key, cx))
+            .or_else(|| self.workspace_for_group(key, cx));
+        if let Some(workspace) = workspace {
+            self.activate_workspace(&workspace, window, cx);
+        } else {
+            self.open_workspace_for_group(key, window, cx);
+        }
+        self.selection = None;
+        self.active_entry = None;
+    }
+
     fn active_project_group_key(&self, cx: &App) -> Option<ProjectGroupKey> {
         let multi_workspace = self.multi_workspace.upgrade()?;
         let multi_workspace = multi_workspace.read(cx);
@@ -4234,45 +4261,33 @@ impl Sidebar {
 
     fn render_sidebar_bottom_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_archive = matches!(self.view, SidebarView::Archive(..));
-        let show_import_button = is_archive && !self.should_render_acp_import_onboarding(cx);
         let on_right = self.side(cx) == SidebarSide::Right;
-
-        let action_buttons = h_flex()
-            .gap_1()
-            .when(on_right, |this| this.flex_row_reverse())
-            .when(show_import_button, |this| {
-                this.child(
-                    IconButton::new("thread-import", IconName::ThreadImport)
-                        .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::text("Import External Agent Threads"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.show_archive(window, cx);
-                            this.show_thread_import_modal(window, cx);
-                        })),
-                )
-            })
-            .child(
-                IconButton::new("history", IconName::History)
-                    .icon_size(IconSize::Small)
-                    .toggle_state(is_archive)
-                    .tooltip(move |_, cx| {
-                        Tooltip::for_action("View All Threads", &ViewAllThreads, cx)
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_archive(&ViewAllThreads, window, cx);
-                    })),
-            )
-            .child(self.render_recent_projects_button(cx));
 
         h_flex()
             .p_1()
             .gap_1()
             .when(on_right, |this| this.flex_row_reverse())
-            .justify_between()
             .border_t_1()
             .border_color(cx.theme().colors().border)
             .child(self.render_sidebar_toggle_button(cx))
-            .child(action_buttons)
+            .child(
+                IconButton::new("history", IconName::Clock)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(is_archive)
+                    .tooltip(move |_, cx| {
+                        let label = if is_archive {
+                            "Hide Thread History"
+                        } else {
+                            "Show Thread History"
+                        };
+                        Tooltip::for_action(label, &ToggleThreadHistory, cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_archive(&ToggleThreadHistory, window, cx);
+                    })),
+            )
+            .child(div().flex_1())
+            .child(self.render_recent_projects_button(cx))
     }
 
     fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
@@ -4398,14 +4413,19 @@ impl Sidebar {
         )
     }
 
-    fn toggle_archive(&mut self, _: &ViewAllThreads, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_archive(
+        &mut self,
+        _: &ToggleThreadHistory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match &self.view {
             SidebarView::ThreadList => {
                 let side = match self.side(cx) {
                     SidebarSide::Left => "left",
                     SidebarSide::Right => "right",
                 };
-                telemetry::event!("Sidebar Archive Viewed", side = side);
+                telemetry::event!("Thread History Viewed", side = side);
                 self.show_archive(window, cx);
             }
             SidebarView::Archive(_) => self.show_thread_list(window, cx),
@@ -4455,6 +4475,9 @@ impl Sidebar {
                 }
                 ThreadsArchiveViewEvent::CancelRestore { thread_id } => {
                     this.restoring_tasks.remove(thread_id);
+                }
+                ThreadsArchiveViewEvent::Import => {
+                    this.show_thread_import_modal(window, cx);
                 }
             },
         );
@@ -4528,7 +4551,7 @@ fn render_import_onboarding_banner(
                 .style(ButtonStyle::OutlinedCustom(cx.theme().colors().border))
                 .label_size(LabelSize::Small)
                 .start_icon(
-                    Icon::new(IconName::ThreadImport)
+                    Icon::new(IconName::Download)
                         .size(IconSize::Small)
                         .color(Color::Muted),
                 )
@@ -4585,7 +4608,7 @@ impl WorkspaceSidebar for Sidebar {
             width: Some(f32::from(self.width)),
             active_view: match self.view {
                 SidebarView::ThreadList => SerializedSidebarView::ThreadList,
-                SidebarView::Archive(_) => SerializedSidebarView::Archive,
+                SidebarView::Archive(_) => SerializedSidebarView::History,
             },
         };
         serde_json::to_string(&serialized).ok()
@@ -4601,7 +4624,7 @@ impl WorkspaceSidebar for Sidebar {
             if let Some(width) = serialized.width {
                 self.width = px(width).clamp(MIN_WIDTH, MAX_WIDTH);
             }
-            if serialized.active_view == SerializedSidebarView::Archive {
+            if serialized.active_view == SerializedSidebarView::History {
                 cx.defer_in(window, |this, window, cx| {
                     this.show_archive(window, cx);
                 });
@@ -4734,7 +4757,7 @@ fn all_thread_infos_for_workspace(
                 .read(cx)
                 .root_thread_has_pending_tool_call(cx);
             let conversation_thread_id = conversation_view.read(cx).parent_id();
-            let thread_view = conversation_view.read(cx).root_thread(cx)?;
+            let thread_view = conversation_view.read(cx).root_thread_view()?;
             let thread_view_ref = thread_view.read(cx);
             let thread = thread_view_ref.thread.read(cx);
 
@@ -4743,8 +4766,9 @@ fn all_thread_infos_for_workspace(
             let title = thread
                 .title()
                 .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into());
-            let is_native = thread_view_ref.as_native_thread(cx).is_some();
-            let is_title_generating = is_native && thread.has_provisional_title();
+            let is_title_generating = thread_view_ref
+                .as_native_thread(cx)
+                .is_some_and(|native_thread| native_thread.read(cx).is_generating_title());
             let session_id = thread.session_id().clone();
             let is_background = agent_panel.is_retained_thread(&conversation_thread_id);
 
@@ -4987,7 +5011,7 @@ fn dump_single_workspace(workspace: &Workspace, output: &mut String, cx: &gpui::
             )
             .ok();
             for (session_id, conversation_view) in background_threads {
-                if let Some(thread_view) = conversation_view.read(cx).root_thread(cx) {
+                if let Some(thread_view) = conversation_view.read(cx).root_thread_view() {
                     let thread = thread_view.read(cx).thread.read(cx);
                     let title = thread.title().unwrap_or_else(|| "(untitled)".into());
                     let status = match thread.status() {
