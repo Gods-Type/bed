@@ -3,6 +3,8 @@ pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 mod migrate;
+#[cfg(target_os = "macos")]
+pub(crate) mod move_to_applications;
 mod open_listener;
 mod open_url_modal;
 mod quick_action_bar;
@@ -34,7 +36,7 @@ use git_ui::project_diff::{BranchDiffToolbar, ProjectDiffToolbar};
 use gpui::{
     Action, App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, DismissEvent,
     Element, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding, ParentElement,
-    PathPromptOptions, PromptLevel, ReadGlobal, SharedString, Size, Task, TitlebarOptions,
+    PathPromptOptions, PromptLevel, ReadGlobal, SharedString, Size, Task, TaskExt, TitlebarOptions,
     UpdateGlobal, WeakEntity, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
     actions, image_cache, img, point, px, retain_all,
 };

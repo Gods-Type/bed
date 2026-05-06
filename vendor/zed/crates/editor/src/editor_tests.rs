@@ -18,8 +18,8 @@ use buffer_diff::{BufferDiff, DiffHunkSecondaryStatus, DiffHunkStatus, DiffHunkS
 use collections::HashMap;
 use futures::{StreamExt, channel::oneshot};
 use gpui::{
-    BackgroundExecutor, DismissEvent, Task, TestAppContext, UpdateGlobal, VisualTestContext,
-    WindowBounds, WindowOptions, div,
+    BackgroundExecutor, DismissEvent, Task, TaskExt, TestAppContext, UpdateGlobal,
+    VisualTestContext, WindowBounds, WindowOptions, div,
 };
 use indoc::indoc;
 use language::{
@@ -6861,6 +6861,40 @@ async fn test_convert_to_sentence_case(cx: &mut TestAppContext) {
     });
     cx.assert_editor_state(indoc! {"
         «Implement windows supportˇ»
+    "});
+}
+
+#[gpui::test]
+async fn test_convert_to_base64(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let mut cx = EditorTestContext::new(cx).await;
+
+    // Encode a plain text selection
+    cx.set_state(indoc! {"
+        «helloˇ»
+    "});
+    cx.update_editor(|e, window, cx| e.convert_to_base64(&ConvertToBase64, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «aGVsbG8=ˇ»
+    "});
+
+    // Decode a valid base64 selection
+    cx.set_state(indoc! {"
+        «aGVsbG8=ˇ»
+    "});
+    cx.update_editor(|e, window, cx| e.convert_from_base64(&ConvertFromBase64, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «helloˇ»
+    "});
+
+    // Decode invalid base64 — should leave text unchanged
+    cx.set_state(indoc! {"
+        «not!!!ˇ»
+    "});
+    cx.update_editor(|e, window, cx| e.convert_from_base64(&ConvertFromBase64, window, cx));
+    cx.assert_editor_state(indoc! {"
+        «not!!!ˇ»
     "});
 }
 
