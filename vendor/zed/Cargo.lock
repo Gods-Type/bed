@@ -407,6 +407,7 @@ dependencies = [
  "language_models",
  "languages",
  "log",
+ "lru",
  "lsp",
  "markdown",
  "menu",
@@ -6166,7 +6167,6 @@ name = "extensions_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "client",
  "cloud_api_types",
  "collections",
  "db",
@@ -19197,6 +19197,7 @@ dependencies = [
  "gpui_util",
  "icons",
  "itertools 0.14.0",
+ "log",
  "menu",
  "num-format",
  "schemars 1.0.4",
@@ -22018,6 +22019,7 @@ dependencies = [
  "collections",
  "component",
  "db",
+ "dirs",
  "fs",
  "futures 0.3.32",
  "futures-lite 1.13.0",
