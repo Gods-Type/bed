@@ -1122,6 +1122,10 @@ pub struct Editor {
     load_diff_task: Option<Shared<Task<()>>>,
     /// Whether we are temporarily displaying a diff other than git's
     temporary_diff_override: bool,
+    /// Whether to render all diff hunks with the "unstaged" appearance,
+    /// regardless of whether they have a secondary hunk. Used by views whose
+    /// diffs aren't related to the git index (e.g. agent diffs).
+    render_diff_hunks_as_unstaged: bool,
     selection_mark_mode: bool,
     toggle_fold_multiple_buffers: Task<()>,
     _scroll_cursor_center_top_bottom_task: Task<()>,
@@ -2348,6 +2352,7 @@ impl Editor {
             text_style_refinement: None,
             load_diff_task: load_uncommitted_diff,
             temporary_diff_override: false,
+            render_diff_hunks_as_unstaged: false,
             minimap: None,
             change_list: ChangeList::new(),
             mode,
@@ -7812,7 +7817,6 @@ impl Editor {
 
         self.selections
             .disjoint_anchor_ranges()
-            .filter(|range| range.start != range.end)
             .flat_map(|range| [range.start, range.end])
             .filter_map(|anchor| snapshot.anchor_to_buffer_anchor(anchor))
             .filter_map(|(_, buffer_snapshot)| multi_buffer.buffer(buffer_snapshot.remote_id()))
