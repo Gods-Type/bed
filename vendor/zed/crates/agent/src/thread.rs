@@ -11,7 +11,7 @@ use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;
 use agent_settings::UserAgentsMd;
 
-use crate::sandboxing::{SandboxRequest, ThreadSandboxGrants, sandboxing_enabled};
+use crate::sandboxing::{SandboxRequest, ThreadSandboxGrants, sandboxing_enabled_for_project};
 use agent_client_protocol::schema as acp;
 use agent_settings::{
     AgentProfileId, AgentSettings, AutoCompactThreshold, COMPACTION_PROMPT,
@@ -1367,9 +1367,10 @@ impl Thread {
         &self.id
     }
 
-    // Only used by Seatbelt-style sandboxes; Linux relies on bwrap's tmpfs
-    // `/tmp` and never needs a per-thread temp directory.
-    #[cfg(not(target_os = "linux"))]
+    // Only used by Seatbelt-style sandboxes (macOS); Linux relies on bwrap's
+    // tmpfs `/tmp` and Windows on the WSL bwrap tmpfs, so neither needs a
+    // per-thread temp directory.
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     pub(crate) fn sandboxed_terminal_temp_dir(
         &mut self,
         cx: &mut Context<Self>,
@@ -3738,7 +3739,7 @@ impl Thread {
         // Terminal variants are configured by users under the canonical
         // `terminal` name. Expose the one matching the current sandbox state
         // to the model under that name.
-        let use_sandboxed_terminal = sandboxing_enabled(cx);
+        let use_sandboxed_terminal = sandboxing_enabled_for_project(self.project.read(cx), cx);
 
         let mut tools = self
             .tools
@@ -3909,8 +3910,12 @@ impl Thread {
             model_name: self.model.as_ref().map(|m| m.name().0.to_string()),
             date: Local::now().format("%Y-%m-%d").to_string(),
             user_agents_md,
-            sandboxing: crate::sandboxing::sandboxing_enabled(cx),
+            sandboxing: crate::sandboxing::sandboxing_enabled_for_project(
+                self.project.read(cx),
+                cx,
+            ),
             is_linux: cfg!(target_os = "linux"),
+            is_windows: cfg!(target_os = "windows"),
         }
         .render(&self.templates)
         .context("failed to build system prompt")
@@ -3970,6 +3975,7 @@ impl Thread {
         let model = self.model.as_ref()?;
         let auto_compact = AgentSettings::get_global(cx).auto_compact;
         let max_tokens = model.max_token_count();
+        let max_input_tokens = max_tokens.saturating_sub(model.max_output_tokens().unwrap_or(0));
         let tokens_before = self
             .latest_request_token_usage()
             .map(|usage| total_input_tokens(usage).saturating_add(usage.output_tokens));
@@ -3987,7 +3993,7 @@ impl Thread {
             auto_compact_threshold: auto_compact.threshold.to_string(),
             auto_compact_threshold_tokens: auto_compact_threshold_token_count(
                 auto_compact.threshold,
-                max_tokens,
+                max_input_tokens,
             ),
             retries: 0,
         })
@@ -4010,9 +4016,11 @@ impl Thread {
 
         let model = self.model.as_ref()?;
         let max_token_count = model.max_token_count();
+        let max_input_tokens =
+            max_token_count.saturating_sub(model.max_output_tokens().unwrap_or(0));
         // Models with a small context window don't leave enough headroom for a
         // compaction pass; the UI warns the user about the token limit instead.
-        if max_token_count < MIN_COMPACTION_CONTEXT_WINDOW {
+        if max_input_tokens < MIN_COMPACTION_CONTEXT_WINDOW {
             return None;
         }
         let (usage_ix, usage) = {
@@ -4040,7 +4048,7 @@ impl Thread {
 
         let active_tokens = total_input_tokens(usage).saturating_add(usage.output_tokens);
         let compaction_threshold =
-            auto_compact_threshold_token_count(auto_compact.threshold, max_token_count);
+            auto_compact_threshold_token_count(auto_compact.threshold, max_input_tokens);
         if active_tokens < compaction_threshold {
             return None;
         }
@@ -5001,9 +5009,10 @@ impl ThreadEventStream {
 }
 
 /// The user's choice when the OS sandbox could not be created for a command
-/// (see [`ToolCallEventStream::authorize_sandbox_fallback`]). Only Linux can
-/// fail to create a sandbox, so this is Linux-only.
-#[cfg(target_os = "linux")]
+/// (see [`ToolCallEventStream::authorize_sandbox_fallback`]). Only the
+/// Bubblewrap sandboxes (Linux directly, Windows via WSL) can fail to create a
+/// sandbox, so this is gated to those platforms.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SandboxFallbackDecision {
     /// Try creating the sandbox again (e.g. after the user installed `bwrap`).
@@ -5029,6 +5038,30 @@ impl ToolCallEventStream {
     pub fn test() -> (Self, ToolCallEventStreamReceiver) {
         let (stream, receiver, _cancellation_tx) = Self::test_with_cancellation();
         (stream, receiver)
+    }
+
+    /// Like [`Self::test`], but the returned stream shares the provided
+    /// thread-scoped sandbox grants. This mirrors how a real [`Thread`] builds a
+    /// distinct event stream per tool call while sharing one set of grants, so
+    /// tests can exercise sequences of tool calls within the same conversation.
+    // Only the macOS-gated terminal sandbox regression test uses this, so match
+    // its `cfg` to avoid a dead-code error on other platforms.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn test_with_grants(
+        sandbox_grants: Rc<RefCell<ThreadSandboxGrants>>,
+    ) -> (Self, ToolCallEventStreamReceiver) {
+        let (events_tx, events_rx) = mpsc::unbounded::<Result<ThreadEvent>>();
+        let (_cancellation_tx, cancellation_rx) = watch::channel(false);
+
+        let stream = ToolCallEventStream::new(
+            "test_id".into(),
+            ThreadEventStream(events_tx),
+            None,
+            cancellation_rx,
+            sandbox_grants,
+        );
+
+        (stream, ToolCallEventStreamReceiver(events_rx))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -5419,7 +5452,6 @@ impl ToolCallEventStream {
                 Ok(())
             }
             Some(acp_thread::SandboxPermission::AllowAlways) => {
-                sandbox_grants.borrow_mut().record(request);
                 Self::persist_sandbox_always_permission(request, fs, cx);
                 Ok(())
             }
@@ -5524,13 +5556,14 @@ impl ToolCallEventStream {
     /// so the prompt explains why (`reason`) and lets the user retry, run the
     /// command unsandboxed (once / for this thread / always), or deny it. The
     /// "for this thread" choice is recorded in the in-memory thread grants and
-    /// "always" is persisted as the `allow_unsandboxed` setting. Only Linux can
-    /// fail to create a sandbox, so this is Linux-only.
+    /// "always" is persisted as the `allow_unsandboxed` setting. Only the
+    /// Bubblewrap sandboxes (Linux directly, Windows via WSL) can fail to
+    /// create a sandbox, so this is gated to those platforms.
     ///
     /// `retries` is how many times the user has already pressed Retry for this
     /// command; it's shown on the button so repeated presses visibly advance
     /// ("Retry", then "Retry (attempt 1)", "Retry (attempt 2)", …).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn authorize_sandbox_fallback(
         &self,
         command: Option<String>,
@@ -5645,7 +5678,7 @@ impl ToolCallEventStream {
 
     /// Persist the `allow_unsandboxed` setting so future commands skip the
     /// sandbox when it can't be created, without prompting again.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn persist_sandbox_unsandboxed_permission(fs: Option<Arc<dyn Fs>>, cx: &AsyncApp) {
         let Some(fs) = fs else {
             log::error!(
@@ -6259,6 +6292,70 @@ mod tests {
                     user_message_id.clone(),
                     language_model::TokenUsage {
                         input_tokens: 900_000,
+                        ..Default::default()
+                    },
+                );
+
+                assert_eq!(thread.compaction_message_target_ix(cx), Some(1));
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn test_compaction_threshold_accounts_for_max_output_tokens(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let model = Arc::new(FakeLanguageModel::default());
+        model.set_max_output_tokens(Some(32_000));
+        let user_message_id = UserMessageId::new();
+
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model, cx);
+                thread.messages.push(user_text_message(
+                    user_message_id.clone(),
+                    "near input limit",
+                ));
+                thread.request_token_usage.insert(
+                    user_message_id.clone(),
+                    language_model::TokenUsage {
+                        input_tokens: 871_199,
+                        ..Default::default()
+                    },
+                );
+
+                assert_eq!(thread.compaction_message_target_ix(cx), None);
+
+                thread.request_token_usage.insert(
+                    user_message_id.clone(),
+                    language_model::TokenUsage {
+                        input_tokens: 871_200,
+                        ..Default::default()
+                    },
+                );
+
+                assert_eq!(thread.compaction_message_target_ix(cx), Some(1));
+
+                set_auto_compact_settings(
+                    cx,
+                    agent_settings::AutoCompactSettings {
+                        enabled: true,
+                        threshold: AutoCompactThreshold::TokensRemaining(20_000),
+                    },
+                );
+                thread.request_token_usage.insert(
+                    user_message_id.clone(),
+                    language_model::TokenUsage {
+                        input_tokens: 948_000,
+                        ..Default::default()
+                    },
+                );
+
+                assert_eq!(thread.compaction_message_target_ix(cx), None);
+
+                thread.request_token_usage.insert(
+                    user_message_id.clone(),
+                    language_model::TokenUsage {
+                        input_tokens: 948_001,
                         ..Default::default()
                     },
                 );
@@ -7019,7 +7116,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_authorize_sandbox_allow_always_records_current_grant(cx: &mut TestAppContext) {
+    async fn test_authorize_sandbox_allow_always_does_not_cache_thread_grant(
+        cx: &mut TestAppContext,
+    ) {
         crate::tests::init_test(cx);
 
         let (event_stream, mut receiver) = ToolCallEventStream::test();
@@ -7095,18 +7194,15 @@ mod tests {
         assert!(send_result.is_ok());
         authorize.await.unwrap();
 
+        // "Allow always" persists to settings only
         let effective = event_stream.effective_sandbox_request(
             &SandboxRequest::default(),
             &agent_settings::SandboxPermissions::default(),
         );
-        assert_eq!(
-            effective.write_paths,
-            vec![
-                PathBuf::from("/tmp/build"),
-                PathBuf::from("/tmp/cache"),
-                PathBuf::from("/tmp/logs"),
-                PathBuf::from("/tmp/secret"),
-            ]
+        assert!(
+            effective.write_paths.is_empty(),
+            "allow always should not record an in-memory thread grant: {:?}",
+            effective.write_paths
         );
     }
 
