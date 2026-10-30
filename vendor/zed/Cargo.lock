@@ -7364,9 +7364,11 @@ dependencies = [
  "gpui_platform",
  "gpui_shared_string",
  "gpui_util",
+ "gpui_web",
  "hdrhistogram",
  "heapless",
  "http_client",
+ "icu_segmenter",
  "image",
  "inventory",
  "itertools 0.14.0",
@@ -7551,6 +7553,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "objc2-screen-capture-kit",
  "objc2-uniform-type-identifiers",
  "objc2-user-notifications",
@@ -8551,6 +8554,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "icu_segmenter"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82d07aafccd67af15d02512a6adf5896fbc5ed00f2e99b471d2efa14016db3db"
+dependencies = [
+ "icu_collections",
+ "icu_locale_fallback",
+ "icu_provider",
+ "icu_segmenter_data",
+ "potential_utf",
+ "smallvec",
+ "utf8_iter",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_segmenter_data"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae293c039020f9ec10710af98d29ce6aa2051486638b49c9a6409f3b4a9e98ad"
+
+[[package]]
 name = "id-arena"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9521,6 +9546,7 @@ name = "language_model"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel 2.5.0",
  "base64 0.22.1",
  "collections",
  "credentials_provider",
@@ -11310,7 +11336,6 @@ name = "notifications"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "channel",
  "client",
  "component",
  "futures-lite 2.6.1",
